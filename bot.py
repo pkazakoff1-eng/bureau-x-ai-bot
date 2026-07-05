@@ -275,6 +275,7 @@ def make_keyboard(lang: str) -> ReplyKeyboardMarkup:
 # Conversation states
 IMG_PHOTO, IMG_PROMPT, IMG_SETTINGS = range(3)
 VID_PHOTO, VID_PROMPT, VID_SETTINGS = range(3, 6)
+ONB_STEP = 6
 TRIAL_DAYS = 5
 MAX_USERS = 5
 STARS_PRICE = 200
@@ -304,14 +305,34 @@ def init_db():
         image_count INTEGER DEFAULT 0,
         language TEXT DEFAULT 'ru'
     )''')
-    for col, default in [('image_count', '0'), ('language', "'ru'"), ('expires_at', 'NULL')]:
+    for col, default in [('image_count', '0'), ('language', "'ru'"), ('expires_at', 'NULL'), ('onboarded', '0')]:
         try:
-            c.execute(f'ALTER TABLE users ADD COLUMN {col} {"INTEGER" if col == "image_count" else "TEXT"} DEFAULT {default}')
+            dtype = 'INTEGER' if col in ('image_count', 'onboarded') else 'TEXT'
+            c.execute(f'ALTER TABLE users ADD COLUMN {col} {dtype} DEFAULT {default}')
         except:
             pass
     conn.commit()
     conn.close()
 
+
+def is_onboarded(user_id):
+    conn = sqlite3.connect('memory.db')
+    c = conn.cursor()
+    try:
+        c.execute('SELECT onboarded FROM users WHERE user_id = ?', (user_id,))
+        row = c.fetchone()
+        return bool(row and row[0])
+    except Exception:
+        return True
+    finally:
+        conn.close()
+
+def set_onboarded(user_id):
+    conn = sqlite3.connect('memory.db')
+    c = conn.cursor()
+    c.execute('UPDATE users SET onboarded=1 WHERE user_id=?', (user_id,))
+    conn.commit()
+    conn.close()
 def get_lang(user_id: int) -> str:
     conn = sqlite3.connect('memory.db')
     c = conn.cursor()
@@ -771,6 +792,82 @@ async def topics_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
+
+# ── Onboarding ───────────────────────────────────────────────────────────────
+ONB_MESSAGES = {
+    'ru': [
+        ('Привет! Я твой AI-ассистент. Давай покажу что умею за 30 секунд 👇', None),
+        ('🎤 *Голос и кружочки*\nПросто отправь голосовое — расшифрую и отвечу.\n\n📷 *Фото и PDF*\nОтправь любое фото или документ — проанализирую.', None),
+        ('🌐 *Веб-поиск*\nСпроси что угодно — найду актуальную информацию в интернете.\n\n🧠 *Память*\nЗапомню твои предпочтения и веду контекст разговора.', None),
+        ('🎨 *Генерация изображений*\nНажми кнопку ниже или напиши /image\n\n🎬 *Видео из фото*\nИз любого фото сделаю короткое видео — /video', None),
+        ('📂 *Темы*\nСоздавай темы для разных задач — Работа, Испания, Идеи. Бот сам предложит сохранить разговор.\n\n🔔 *Напоминания*\nНапиши «напомни завтра в 10 позвонить» — поставлю.', None),
+        ('Всё готово! Просто пиши мне — я всегда здесь 🚀\n\nЕсли что-то непонятно — /help', 'done'),
+    ],
+    'en': [
+        ('Hi! I\'m your AI assistant. Let me show you what I can do in 30 seconds 👇', None),
+        ('🎤 *Voice & video notes*\nSend a voice message — I\'ll transcribe and reply.\n\n📷 *Photos & PDFs*\nSend any photo or document — I\'ll analyze it.', None),
+        ('🌐 *Web search*\nAsk anything — I\'ll find current info from the internet.\n\n🧠 *Memory*\nI remember your preferences and keep conversation context.', None),
+        ('🎨 *Image generation*\nTap the button or type /image\n\n🎬 *Video from photo*\nI\'ll turn any photo into a short video — /video', None),
+        ('📂 *Topics*\nCreate topics for different tasks. I\'ll suggest saving conversations automatically.\n\n🔔 *Reminders*\nWrite «remind me tomorrow at 10 to call John» — I\'ll set it.', None),
+        ('All set! Just write to me — I\'m always here 🚀\n\nIf you need help — /help', 'done'),
+    ]
+}
+
+async def send_onboarding_step(update_or_msg, context, step, lang):
+    msgs = ONB_MESSAGES.get(lang, ONB_MESSAGES['ru'])
+    if step >= len(msgs):
+        return ConversationHandler.END
+    text, action = msgs[step]
+    if action == 'done':
+        kb = None
+    else:
+        next_label = 'Далее →' if lang == 'ru' else 'Next →'
+        skip_label = 'Пропустить' if lang == 'ru' else 'Skip'
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton(next_label, callback_data='onb_next'),
+            InlineKeyboardButton(skip_label, callback_data='onb_skip'),
+        ]])
+    msg = update_or_msg if hasattr(update_or_msg, 'reply_text') else update_or_msg.message
+    await msg.reply_text(text, parse_mode='Markdown', reply_markup=kb)
+    return ONB_STEP
+
+async def onb_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    lang = get_lang(user_id)
+    if query.data == 'onb_skip':
+        set_onboarded(user_id)
+        done = 'Окей, начинаем! Пиши мне что угодно 🚀' if lang == 'ru' else 'All good! Write me anything 🚀'
+        await query.edit_message_text(done)
+        return ConversationHandler.END
+    step = context.user_data.get('onb_step', 0) + 1
+    context.user_data['onb_step'] = step
+    msgs = ONB_MESSAGES.get(lang, ONB_MESSAGES['ru'])
+    if step >= len(msgs):
+        set_onboarded(user_id)
+        await query.edit_message_text(msgs[-1][0], parse_mode='Markdown')
+        return ConversationHandler.END
+    text, action = msgs[step]
+    if action == 'done':
+        set_onboarded(user_id)
+        await query.edit_message_text(text, parse_mode='Markdown')
+        return ConversationHandler.END
+    next_label = 'Далее →' if lang == 'ru' else 'Next →'
+    skip_label = 'Пропустить' if lang == 'ru' else 'Skip'
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton(next_label, callback_data='onb_next'),
+        InlineKeyboardButton(skip_label, callback_data='onb_skip'),
+    ]])
+    await query.edit_message_text(text, parse_mode='Markdown', reply_markup=kb)
+    return ONB_STEP
+
+onb_conv = ConversationHandler(
+    entry_points=[],
+    states={ONB_STEP: [CallbackQueryHandler(onb_callback, pattern='^onb_')]},
+    fallbacks=[],
+    per_user=True, per_chat=True,
+)
 # ── /image conversation ────────────────────────────────────────────────────────
 
 async def cmd_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1206,6 +1303,9 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         caption = t(lang, 'start_admin')
     else:
         caption = t(lang, 'start_user', days=TRIAL_DAYS, price=STARS_PRICE)
+    # Trigger onboarding for new users
+    if user_id not in ADMIN_IDS and not is_onboarded(user_id):
+        context.user_data['onb_step'] = 0
     try:
         reply_markup = make_keyboard(lang)
         if GIF_FILE_ID:
@@ -1219,6 +1319,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"GIF send error: {e}")
         await update.message.reply_text(caption, reply_markup=make_keyboard(lang))
+    if user_id not in ADMIN_IDS and not is_onboarded(user_id):
+        await send_onboarding_step(update.message, context, 0, lang)
 
 async def cmd_subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -1679,9 +1781,11 @@ vid_conv = ConversationHandler(
     fallbacks=[CommandHandler("cancel", cmd_cancel)],
     per_user=True, per_chat=True,
 )
+app.add_handler(onb_conv)
 app.add_handler(img_conv)
 app.add_handler(vid_conv)
 
+app.add_handler(CallbackQueryHandler(onb_callback, pattern='^onb_'))
 app.add_handler(CommandHandler("topics", cmd_topics))
 app.add_handler(CallbackQueryHandler(topics_callback, pattern="^topic_"))
 app.add_handler(CallbackQueryHandler(lang_callback, pattern="^setlang_"))
@@ -1702,7 +1806,7 @@ app.add_handler(MessageHandler(filters.ANIMATION, handle_animation))
 app.add_handler(MessageHandler((filters.VIDEO & ~filters.ANIMATION) | filters.VIDEO_NOTE, handle_media_video))
 app.add_handler(MessageHandler(filters.PHOTO, handle_smart_photo))
 app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
-print("Bot started v11 — reminders + .ics calendar")
+print("Bot started v12 — onboarding")
 import datetime as dt
 app.job_queue.run_repeating(check_reminders, interval=60, first=10)
 app.job_queue.run_daily(
