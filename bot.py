@@ -38,7 +38,7 @@ MAIN_KEYBOARD = ReplyKeyboardMarkup(
 
 # Conversation states
 IMG_PHOTO, IMG_PROMPT, IMG_SETTINGS = range(3)
-VID_PHOTO, VID_PROMPT = range(3, 5)
+VID_PHOTO, VID_PROMPT, VID_SETTINGS = range(3, 6)
 TRIAL_DAYS = 5
 MAX_USERS = 5  # лимит тестировщиков
 STARS_PRICE = 200       # Stars за 30 дней (~$2)
@@ -520,7 +520,7 @@ async def cmd_video_gen(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
     context.user_data.clear()
     await update.message.reply_text(
-        "🎬 *Генерация видео*\n\nОтправь фото, из которого сделаем видео.",
+        "🎬 *Генерация видео*\n\nОтправь фото — из него сделаем видео.",
         parse_mode="Markdown"
     )
     return VID_PHOTO
@@ -533,12 +533,10 @@ async def vid_receive_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     file = await context.bot.get_file(photo.file_id)
     file_bytes = await file.download_as_bytearray()
     context.user_data["vid_photo"] = base64.standard_b64encode(file_bytes).decode()
-    if update.message.caption:
-        context.user_data["vid_prompt"] = update.message.caption
-        return await vid_generate(update, context)
     await update.message.reply_text(
-        "Фото получил! Напиши промт — что должно происходить в видео.\n"
-        "Или /skip для автоматического движения."
+        "📸 Фото получил!\n\n"
+        "Напиши промт — что должно происходить в видео.\n"
+        "Или отправь /skip для автоматического движения."
     )
     return VID_PROMPT
 
@@ -546,33 +544,64 @@ async def vid_receive_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if update.message.text and update.message.text.strip() == "/skip":
         context.user_data["vid_prompt"] = "Smooth cinematic motion, high quality"
     else:
-        context.user_data["vid_prompt"] = update.message.text or ""
-    return await vid_generate(update, context)
+        context.user_data["vid_prompt"] = update.message.text or "Smooth cinematic motion"
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("⏱ 5 сек", callback_data="vd_5_480p"),
+            InlineKeyboardButton("⏱ 10 сек", callback_data="vd_10_480p"),
+        ],
+        [
+            InlineKeyboardButton("📺 480p / 5 сек", callback_data="vd_5_480p"),
+            InlineKeyboardButton("📺 720p / 5 сек", callback_data="vd_5_720p"),
+        ],
+        [
+            InlineKeyboardButton("📺 480p / 10 сек", callback_data="vd_10_480p"),
+            InlineKeyboardButton("📺 720p / 10 сек", callback_data="vd_10_720p"),
+        ],
+    ])
+    await update.message.reply_text(
+        "⚙️ Выбери параметры видео:",
+        reply_markup=keyboard
+    )
+    return VID_SETTINGS
 
-async def vid_generate(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
+async def vid_settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    # pattern: vd_{duration}_{resolution}
+    parts = query.data.split("_")  # ['vd', '5', '480p']
+    duration = int(parts[1])
+    resolution = parts[2]
+    context.user_data["vid_duration"] = duration
+    context.user_data["vid_resolution"] = resolution
+
+    # resolve endpoint by resolution
+    endpoint = "bytedance/seedance-2-0-mini-i2v-720p" if resolution == "720p" else "bytedance/seedance-2-0-mini-i2v-480p"
+
+    user_id = query.from_user.id
     allowed, reason = can_generate_video(user_id)
     if not allowed:
-        await update.message.reply_text(
+        await query.edit_message_text(
             "🔒 Генерация видео доступна только по подписке.\n"
             f"Оформи за {STARS_PRICE} ⭐️/месяц — /subscribe"
         )
         return ConversationHandler.END
-    await update.message.reply_text("⏳ Генерирую видео, ~30-60 сек...")
+
+    await query.edit_message_text(f"⏳ Генерирую видео {duration} сек / {resolution}, ~30-90 сек...")
     photo_b64 = context.user_data.get("vid_photo", "")
     prompt = context.user_data.get("vid_prompt", "Smooth cinematic motion")
     try:
         payload = {
             "image": f"data:image/jpeg;base64,{photo_b64}",
             "prompt": prompt,
-            "duration": 5,
-            "resolution": "480p",
+            "duration": duration,
+            "resolution": resolution,
         }
-        url = await wavespeed_request("bytedance/seedance-2-0-mini-i2v-480p", payload)
-        await update.message.reply_video(video=url, caption=f"✅ {prompt[:200]}")
+        url = await wavespeed_request(endpoint, payload)
+        await query.message.reply_video(video=url, caption=f"✅ {duration}с / {resolution}\n{prompt[:180]}")
     except Exception as e:
         logger.error(f"Video gen error: {e}")
-        await update.message.reply_text(f"Ошибка генерации видео: {e}")
+        await query.message.reply_text(f"Ошибка генерации видео: {e}")
     return ConversationHandler.END
 
 async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1167,6 +1196,7 @@ vid_conv = ConversationHandler(
     states={
         VID_PHOTO: [MessageHandler(filters.PHOTO, vid_receive_photo)],
         VID_PROMPT: [MessageHandler(filters.TEXT & ~filters.COMMAND, vid_receive_prompt)],
+        VID_SETTINGS: [CallbackQueryHandler(vid_settings_callback, pattern="^vd_")],
     },
     fallbacks=[CommandHandler("cancel", cmd_cancel)],
     per_user=True, per_chat=True,
