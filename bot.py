@@ -92,6 +92,12 @@ STRINGS = {
         'topics_selected': '✅ Тема: *{name}*\n\nПиши — отвечу в контексте этой темы.',
         'topics_deleted': '🗑 Тема удалена.\n\nВыбери тему:',
         'topics_created': '✅ Тема *{name}* создана и выбрана!',
+        'topics_ask_goal': '✅ Тема: *{name}*\n\nЧто хочешь сделать в этой теме? Напиши цель или вопрос — сразу отвечу по делу.\nИли просто пиши — войду в контекст темы.',
+        'topics_goal_set': '[{name}] Понял, работаем. Пиши.',
+        'topics_save_as': '💡 Сохранить этот разговор как тему?',
+        'topics_save_btn': '💾 Сохранить как тему',
+        'topics_saved': '✅ Тема *{name}* создана!',
+        'topics_detect_prompt': 'Определи одним коротким словом или фразой (максимум 3 слова) тему этого разговора на основе последних сообщений. Только тема, без пояснений.',
         'voice_received': 'Голосовое получил, транскрибирую...',
         'voice_no_speech': 'Не смог распознать.',
         'voice_recognized': 'Распознал: {text}',
@@ -189,6 +195,12 @@ STRINGS = {
         'topics_selected': '✅ Topic: *{name}*\n\nWrite — I\'ll reply in this topic\'s context.',
         'topics_deleted': '🗑 Topic deleted.\n\nSelect a topic:',
         'topics_created': '✅ Topic *{name}* created and selected!',
+        'topics_ask_goal': '✅ Topic: *{name}*\n\nWhat do you want to do in this topic? Write your goal or question — I\'ll focus on it right away.\nOr just write — I\'ll pick up the context.',
+        'topics_goal_set': '[{name}] Got it. Go ahead.',
+        'topics_save_as': '💡 Save this conversation as a topic?',
+        'topics_save_btn': '💾 Save as topic',
+        'topics_saved': '✅ Topic *{name}* created!',
+        'topics_detect_prompt': 'Identify in one short phrase (max 3 words) the topic of this conversation based on the last messages. Only the topic, no explanation.',
         'voice_received': 'Voice message received, transcribing...',
         'voice_no_speech': 'Could not recognize speech.',
         'voice_recognized': 'Recognized: {text}',
@@ -713,7 +725,17 @@ async def topics_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tid = int(parts[2])
         name = parts[3]
         set_active_topic(context, tid, name)
-        await query.edit_message_text(t(lang, 'topics_selected', name=name), parse_mode="Markdown")
+        # Ask for goal/context for this topic session
+        goal_text = t(lang, 'topics_ask_goal', name=name)
+        await query.edit_message_text(goal_text, parse_mode="Markdown")
+        context.user_data['topic_awaiting_goal'] = True
+        return
+
+    if data.startswith("topic_autosave_"):
+        name = data.replace("topic_autosave_", "")
+        tid = create_topic(user_id, name)
+        set_active_topic(context, tid, name)
+        await query.edit_message_text(t(lang, 'topics_saved', name=name), parse_mode="Markdown")
         return
 
     if data.startswith("topic_delete_"):
@@ -1050,6 +1072,23 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(t(lang, 'topics_created', name=user_text), parse_mode="Markdown")
         return
 
+    # Handle topic goal input
+    if context.user_data.get('topic_awaiting_goal'):
+        del context.user_data['topic_awaiting_goal']
+        active_id, active_name = get_active_topic(context)
+        if active_id:
+            # Save goal as first message in topic and respond
+            save_topic_message(user_id, active_id, "user", user_text)
+            goal_system = get_system(user_id) + f"\n\nАктивная тема: {active_name}. Цель пользователя: {user_text}. Сфокусируйся на этой задаче."
+            response = client.messages.create(
+                model="claude-sonnet-4-6", max_tokens=1000,
+                system=goal_system,
+                messages=[{"role": "user", "content": user_text}])
+            reply = response.content[0].text
+            save_topic_message(user_id, active_id, "assistant", reply)
+            await update.message.reply_text(f"[{active_name}] {reply}")
+        return
+
     # Keyboard buttons — check both languages
     btn_image_vals = {STRINGS['ru']['btn_image'], STRINGS['en']['btn_image']}
     btn_video_vals = {STRINGS['ru']['btn_video'], STRINGS['en']['btn_video']}
@@ -1116,6 +1155,27 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply = response.content[0].text
             save_message(user_id, "assistant", reply)
             await update.message.reply_text(reply)
+            # Auto-detect topic suggestion every 6 messages
+            msg_count = get_message_count(user_id)
+            if msg_count > 0 and msg_count % 6 == 0:
+                try:
+                    recent = get_history(user_id)[-6:]
+                    detect_prompt = t(lang, 'topics_detect_prompt')
+                    det_resp = client.messages.create(
+                        model="claude-haiku-4-5-20251001", max_tokens=30,
+                        messages=[{"role": "user", "content": detect_prompt + "\n\n" + "\n".join([f"{m['role']}: {m['content'][:100]}" for m in recent])}])
+                    detected_name = det_resp.content[0].text.strip()[:40]
+                    if detected_name and len(detected_name) > 2:
+                        keyboard = InlineKeyboardMarkup([[
+                            InlineKeyboardButton(t(lang, 'topics_save_btn'), callback_data=f"topic_autosave_{detected_name}")
+                        ]])
+                        await update.message.reply_text(
+                            f"{t(lang, 'topics_save_as')} *{detected_name}*",
+                            parse_mode="Markdown",
+                            reply_markup=keyboard
+                        )
+                except Exception:
+                    pass
     except Exception as e:
         logger.error(f"Text error: {e}")
         await update.message.reply_text(t(lang, 'error_retry'))
