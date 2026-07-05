@@ -10,6 +10,7 @@ import logging
 from datetime import datetime, timezone, timedelta
 import asyncio
 import httpx
+import uuid
 from telegram import Update, LabeledPrice, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from telegram.constants import ChatAction
 from telegram.ext import (ApplicationBuilder, MessageHandler, CommandHandler,
@@ -127,6 +128,10 @@ STRINGS = {
         'lang_choose': '🌐 Выбери язык / Choose language:',
         'lang_set_ru': '✅ Язык установлен: Русский 🇷🇺',
         'lang_set_en': '✅ Language set: English 🇬🇧',
+        'remind_set': 'Напоминание установлено на {dt} 🔔',
+        'remind_text': '🔔 Напоминание: {text}',
+        'remind_no_time': 'Не понял время. Напиши например: напомни завтра в 10 позвонить Саше',
+        'remind_ics': '📅 Добавить в календарь:',
         'notify_expiring': '⏰ Подписка заканчивается через 3 дня.\n\nПродли сейчас чтобы не прерываться — /subscribe',
         'notify_expired': '😔 Подписка закончилась.\n\nОформи снова — {price} ⭐️/мес: /subscribe\n\nИли оставь фидбек: @BX_Supp_bot',
         'search_keywords': ['найди', 'поищи', 'что сейчас', 'актуально', 'последние', 'новости',
@@ -230,6 +235,14 @@ STRINGS = {
         'lang_choose': '🌐 Выбери язык / Choose language:',
         'lang_set_ru': '✅ Язык установлен: Русский 🇷🇺',
         'lang_set_en': '✅ Language set: English 🇬🇧',
+        'remind_set': 'Напоминание установлено на {dt} 🔔',
+        'remind_text': '🔔 Напоминание: {text}',
+        'remind_no_time': 'Не понял время. Напиши например: напомни завтра в 10 позвонить Саше',
+        'remind_ics': '📅 Добавить в календарь:',
+        'remind_set': 'Reminder set for {dt} 🔔',
+        'remind_text': '🔔 Reminder: {text}',
+        'remind_no_time': 'Could not parse time. Try: remind me tomorrow at 10 to call John',
+        'remind_ics': '📅 Add to calendar:',
         'notify_expiring': '⏰ Your subscription expires in 3 days.\n\nRenew now to avoid interruptions — /subscribe',
         'notify_expired': '😔 Your subscription has expired.\n\nRenew — {price} ⭐️/month: /subscribe\n\nOr leave feedback: @BX_Supp_bot',
         'search_keywords': ['find', 'search', 'look up', 'current', 'latest', 'news',
@@ -1030,6 +1043,95 @@ async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 init_db()
 
+
+# ── Reminders ────────────────────────────────────────────────────────────────
+def init_reminders(conn):
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS reminders (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
+        remind_at DATETIME,
+        text TEXT,
+        sent INTEGER DEFAULT 0
+    )''')
+    conn.commit()
+
+def save_reminder(user_id, remind_at, text):
+    conn = sqlite3.connect('memory.db')
+    init_reminders(conn)
+    c = conn.cursor()
+    c.execute('INSERT INTO reminders (user_id, remind_at, text) VALUES (?, ?, ?)',
+              (user_id, remind_at.isoformat(), text))
+    rid = c.lastrowid
+    conn.commit()
+    conn.close()
+    return rid
+
+def make_ics(title, remind_at):
+    uid = str(uuid.uuid4())
+    dt = remind_at.strftime('%Y%m%dT%H%M%SZ')
+    lines = [
+        'BEGIN:VCALENDAR',
+        'VERSION:2.0',
+        'PRODID:-//BX Assistant//EN',
+        'BEGIN:VEVENT',
+        'UID:' + uid,
+        'DTSTAMP:' + dt,
+        'DTSTART:' + dt,
+        'SUMMARY:' + title.replace(',', '\,'),
+        'DESCRIPTION:' + title.replace(',', '\,'),
+        'END:VEVENT',
+        'END:VCALENDAR',
+    ]
+    return chr(10).join(lines)
+
+async def parse_reminder(text, lang='ru'):
+    """Use Claude to extract remind_at datetime and reminder text from natural language."""
+    now = datetime.now(timezone.utc)
+    prompt = (
+        'Extract reminder info from this message. Return JSON only, no explanation.\n'
+        'Format: {"dt": "YYYY-MM-DDTHH:MM:SS", "text": "reminder text"}\n'
+        'Current UTC time: ' + now.isoformat() + '\n'
+        'User timezone offset: +3 (Moscow) unless stated otherwise.\n'
+        'Message: ' + text
+    )
+    try:
+        resp = client.messages.create(
+            model='claude-haiku-4-5-20251001', max_tokens=100,
+            messages=[{'role': 'user', 'content': prompt}]
+        )
+        import json
+        data = json.loads(resp.content[0].text.strip())
+        dt = datetime.fromisoformat(data['dt'])
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt, data.get('text', text)
+    except Exception:
+        return None, None
+
+async def check_reminders(context):
+    """Job: fires pending reminders."""
+    now = datetime.now(timezone.utc)
+    conn = sqlite3.connect('memory.db')
+    init_reminders(conn)
+    c = conn.cursor()
+    c.execute(
+        'SELECT id, user_id, text FROM reminders WHERE sent=0 AND datetime(remind_at) <= datetime(?)',
+        (now.isoformat(),)
+    )
+    due = c.fetchall()
+    for rid, user_id, text in due:
+        lang = get_lang(user_id)
+        try:
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=t(lang, 'remind_text', text=text)
+            )
+        except Exception as e:
+            pass
+        c.execute('UPDATE reminders SET sent=1 WHERE id=?', (rid,))
+    conn.commit()
+    conn.close()
 async def check_expiring_subscriptions(context: ContextTypes.DEFAULT_TYPE):
     conn = sqlite3.connect('memory.db')
     c = conn.cursor()
@@ -1219,6 +1321,33 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(t(lang, 'remembered'))
             return
 
+        # Reminder detection
+        remind_kw = ['напомни', 'напоминай', 'поставь напоминание', 'remind me', 'set a reminder', 'set reminder']
+        if any(kw in user_text.lower() for kw in remind_kw):
+            await update.message.reply_chat_action(ChatAction.TYPING)
+            remind_dt, remind_text = await parse_reminder(user_text, lang)
+            if remind_dt and remind_dt > datetime.now(timezone.utc):
+                save_reminder(user_id, remind_dt, remind_text)
+                # Schedule job
+                context.application.job_queue.run_once(
+                    check_reminders,
+                    when=remind_dt,
+                    name='reminder_' + str(user_id)
+                )
+                dt_str = remind_dt.strftime('%d.%m %H:%M')
+                await update.message.reply_text(t(lang, 'remind_set', dt=dt_str))
+                # Send .ics file
+                ics_content = make_ics(remind_text, remind_dt)
+                ics_bytes = ics_content.encode('utf-8')
+                import io
+                await update.message.reply_document(
+                    document=io.BytesIO(ics_bytes),
+                    filename='reminder.ics',
+                    caption=t(lang, 'remind_ics')
+                )
+            else:
+                await update.message.reply_text(t(lang, 'remind_no_time'))
+            return
         await update.message.reply_chat_action(ChatAction.TYPING)
         search_context = ""
         if needs_search(user_text, lang):
@@ -1573,8 +1702,9 @@ app.add_handler(MessageHandler(filters.ANIMATION, handle_animation))
 app.add_handler(MessageHandler((filters.VIDEO & ~filters.ANIMATION) | filters.VIDEO_NOTE, handle_media_video))
 app.add_handler(MessageHandler(filters.PHOTO, handle_smart_photo))
 app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
-print("Bot started v10 — typing + reset + memory + admin")
+print("Bot started v11 — reminders + .ics calendar")
 import datetime as dt
+app.job_queue.run_repeating(check_reminders, interval=60, first=10)
 app.job_queue.run_daily(
     check_expiring_subscriptions,
     time=dt.time(hour=10, minute=0, tzinfo=timezone.utc)
