@@ -10,7 +10,7 @@ import logging
 from datetime import datetime, timezone, timedelta
 import asyncio
 import httpx
-from telegram import Update, LabeledPrice, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
+from telegram import Update, LabeledPrice, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from telegram.ext import (ApplicationBuilder, MessageHandler, CommandHandler,
                           PreCheckoutQueryHandler, ConversationHandler,
                           CallbackQueryHandler, filters, ContextTypes)
@@ -30,16 +30,17 @@ WAVESPEED_KEY = os.getenv("WAVESPEED_API_KEY", "")
 MAIN_KEYBOARD = ReplyKeyboardMarkup(
     [
         [KeyboardButton("🎨 Генерация фото"), KeyboardButton("🎬 Генерация видео")],
-        [KeyboardButton("💳 Подписка"), KeyboardButton("❓ Помощь")],
+        [KeyboardButton("📂 Темы"), KeyboardButton("💳 Подписка"), KeyboardButton("❓ Помощь")],
     ],
     resize_keyboard=True,
     input_field_placeholder="Напиши сообщение или выбери действие..."
 )
 
 # Conversation states
-IMG_PROMPT, IMG_SETTINGS = range(2)
-VID_PHOTO, VID_PROMPT = range(2, 4)
+IMG_PHOTO, IMG_PROMPT, IMG_SETTINGS = range(3)
+VID_PHOTO, VID_PROMPT = range(3, 5)
 TRIAL_DAYS = 5
+MAX_USERS = 5  # лимит тестировщиков
 STARS_PRICE = 200       # Stars за 30 дней (~$2)
 SUB_DAYS = 30
 
@@ -73,6 +74,15 @@ def init_db():
         pass
     conn.commit()
     conn.close()
+
+def get_total_users():
+    conn = sqlite3.connect('memory.db')
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM users WHERE user_id NOT IN ({})".format(
+        ','.join(str(i) for i in ADMIN_IDS)))
+    count = c.fetchone()[0]
+    conn.close()
+    return count
 
 def register_user(user_id, username=""):
     conn = sqlite3.connect('memory.db')
@@ -279,7 +289,7 @@ def can_generate_image(user_id):
         return True, None
     # trial or expired — 1 free image
     count = get_image_count(user_id)
-    if count < 1:
+    if count < 3:
         return True, "free_image"
     return False, "no_sub"
 
@@ -335,45 +345,133 @@ async def wavespeed_request(endpoint: str, payload: dict) -> str:
         raise Exception("Generation timeout")
 
 
+
+# ── Topics ────────────────────────────────────────────────────────────────────
+
+CREATE_TOPIC = 10
+
+async def cmd_topics(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_access(update):
+        return
+    user_id = update.effective_user.id
+    topics = get_topics(user_id)
+    active_id, active_name = get_active_topic(context)
+
+    keyboard = []
+    for tid, name in topics:
+        marker = "✅ " if tid == active_id else ""
+        keyboard.append([
+            InlineKeyboardButton(f"{marker}{name}", callback_data=f"topic_select_{tid}_{name}"),
+            InlineKeyboardButton("🗑", callback_data=f"topic_delete_{tid}")
+        ])
+    keyboard.append([InlineKeyboardButton("+ Создать тему", callback_data="topic_create")])
+    if active_id:
+        keyboard.append([InlineKeyboardButton("❌ Выйти из темы", callback_data="topic_exit")])
+
+    current = f"Сейчас: *{active_name}*" if active_name else "Сейчас: общий чат"
+    await update.message.reply_text(
+        f"📂 *Мои темы*\n{current}\n\nВыбери тему или создай новую:",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+async def topics_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    data = query.data
+
+    if data == "topic_create":
+        await query.edit_message_text("Напиши название новой темы:")
+        context.user_data['waiting_topic_name'] = True
+        return
+
+    if data == "topic_exit":
+        clear_active_topic(context)
+        await query.edit_message_text("Вышел из темы. Теперь общий чат.")
+        return
+
+    if data.startswith("topic_select_"):
+        parts = data.split("_", 3)
+        tid = int(parts[2])
+        name = parts[3]
+        set_active_topic(context, tid, name)
+        await query.edit_message_text(f"✅ Тема: *{name}*\n\nПиши — отвечу в контексте этой темы.", parse_mode="Markdown")
+        return
+
+    if data.startswith("topic_delete_"):
+        tid = int(data.split("_")[2])
+        active_id, _ = get_active_topic(context)
+        if active_id == tid:
+            clear_active_topic(context)
+        delete_topic(tid, user_id)
+        topics = get_topics(user_id)
+        keyboard = []
+        for t_id, name in topics:
+            keyboard.append([
+                InlineKeyboardButton(name, callback_data=f"topic_select_{t_id}_{name}"),
+                InlineKeyboardButton("🗑", callback_data=f"topic_delete_{t_id}")
+            ])
+        keyboard.append([InlineKeyboardButton("+ Создать тему", callback_data="topic_create")])
+        await query.edit_message_text(
+            "🗑 Тема удалена.\n\nВыбери тему:",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
 # ── /image conversation ────────────────────────────────────────────────────────
 
 async def cmd_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_access(update):
         return ConversationHandler.END
-    context.user_data.clear()
+    context.user_data.pop("img_ref", None)
+    context.user_data.pop("prompt", None)
+    keyboard = [[InlineKeyboardButton("⏭ Пропустить", callback_data="img_skip_photo")]]
     await update.message.reply_text(
         "🎨 *Генерация изображения*\n\n"
-        "Отправь промт — или фото с промтом в подписи (тогда буду использовать фото как референс).",
-        parse_mode="Markdown"
+        "Шаг 1: Прикрепи фото как референс.\n"
+        "Или нажми Пропустить чтобы генерировать с нуля.",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
-    return IMG_PROMPT
+    return IMG_PHOTO
 
-async def img_receive_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def img_receive_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.photo:
         photo = update.message.photo[-1]
         file = await context.bot.get_file(photo.file_id)
         file_bytes = await file.download_as_bytearray()
         context.user_data["img_ref"] = base64.standard_b64encode(file_bytes).decode()
-        prompt = update.message.caption or ""
-        if not prompt:
-            await update.message.reply_text("Напиши промт в подписи к фото, или отправь текст отдельно.")
-            return IMG_PROMPT
-        context.user_data["prompt"] = prompt
-    elif update.message.text:
-        context.user_data["prompt"] = update.message.text
-    else:
+        await update.message.reply_text("✅ Фото получил!\n\nШаг 2: Напиши промт — что именно сгенерировать?")
         return IMG_PROMPT
+    await update.message.reply_text("Отправь фото или нажми Пропустить.")
+    return IMG_PHOTO
 
+async def img_skip_photo_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text("Шаг 2: Напиши промт — что сгенерировать?")
+    return IMG_PROMPT
+
+async def img_receive_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message.text:
+        return IMG_PROMPT
+    context.user_data["prompt"] = update.message.text
     keyboard = [[
         InlineKeyboardButton("1:1 📷", callback_data="ratio_1:1"),
         InlineKeyboardButton("16:9 🖥", callback_data="ratio_16:9"),
         InlineKeyboardButton("9:16 📱", callback_data="ratio_9:16"),
     ]]
-    await update.message.reply_text("Выбери формат:", reply_markup=InlineKeyboardMarkup(keyboard))
+    await update.message.reply_text(
+        f"✅ Промт: _{update.message.text[:80]}_\n\nШаг 3: Выбери формат:",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
     return IMG_SETTINGS
 
 async def img_settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
+    if not query.data.startswith("ratio_"):
+        return
     await query.answer()
     user_id = update.effective_user.id
     allowed, reason = can_generate_image(user_id)
@@ -484,6 +582,141 @@ async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 init_db()
 
+async def check_expiring_subscriptions(context: ContextTypes.DEFAULT_TYPE):
+    """Runs daily — notifies users 3 days before expiry and on expiry day."""
+    conn = sqlite3.connect('memory.db')
+    c = conn.cursor()
+    now = datetime.now(timezone.utc)
+
+    # Expiring in ~3 days
+    in_3_days = now + timedelta(days=3)
+    c.execute("""
+        SELECT user_id FROM users
+        WHERE status = 'active'
+        AND expires_at IS NOT NULL
+        AND datetime(expires_at) BETWEEN datetime(?) AND datetime(?)
+    """, (now.isoformat(), in_3_days.isoformat()))
+    expiring_soon = c.fetchall()
+
+    # Already expired (within last 24h)
+    yesterday = now - timedelta(days=1)
+    c.execute("""
+        SELECT user_id FROM users
+        WHERE status = 'active'
+        AND expires_at IS NOT NULL
+        AND datetime(expires_at) < datetime(?)
+        AND datetime(expires_at) > datetime(?)
+    """, (now.isoformat(), yesterday.isoformat()))
+    just_expired = c.fetchall()
+    conn.close()
+
+    for (user_id,) in expiring_soon:
+        if user_id in ADMIN_IDS:
+            continue
+        try:
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=f"⏰ Подписка заканчивается через 3 дня.\n\n"
+                     f"Продли сейчас чтобы не прерываться — /subscribe"
+            )
+        except Exception as e:
+            logger.error(f"Notify error {user_id}: {e}")
+
+    for (user_id,) in just_expired:
+        if user_id in ADMIN_IDS:
+            continue
+        try:
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=f"😔 Подписка закончилась.\n\n"
+                     f"Оформи снова — {STARS_PRICE} ⭐️/мес: /subscribe\n\n"
+                     f"Или оставь фидбек: @BX_Supp_bot"
+            )
+            # Update status to trial so check_access handles them correctly
+            conn2 = sqlite3.connect('memory.db')
+            c2 = conn2.cursor()
+            c2.execute("UPDATE users SET status='trial' WHERE user_id=?", (user_id,))
+            conn2.commit()
+            conn2.close()
+        except Exception as e:
+            logger.error(f"Expired notify error {user_id}: {e}")
+
+
+def init_topics(conn):
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS topics (
+        topic_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
+        name TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS topic_messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
+        topic_id INTEGER,
+        role TEXT,
+        content TEXT,
+        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+    )''')
+    conn.commit()
+
+def get_topics(user_id):
+    conn = sqlite3.connect('memory.db')
+    init_topics(conn)
+    c = conn.cursor()
+    c.execute("SELECT topic_id, name FROM topics WHERE user_id = ? ORDER BY created_at DESC", (user_id,))
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+def create_topic(user_id, name):
+    conn = sqlite3.connect('memory.db')
+    init_topics(conn)
+    c = conn.cursor()
+    c.execute("INSERT INTO topics (user_id, name) VALUES (?, ?)", (user_id, name))
+    topic_id = c.lastrowid
+    conn.commit()
+    conn.close()
+    return topic_id
+
+def delete_topic(topic_id, user_id):
+    conn = sqlite3.connect('memory.db')
+    c = conn.cursor()
+    c.execute("DELETE FROM topics WHERE topic_id = ? AND user_id = ?", (topic_id, user_id))
+    c.execute("DELETE FROM topic_messages WHERE topic_id = ? AND user_id = ?", (topic_id, user_id))
+    conn.commit()
+    conn.close()
+
+def get_topic_history(user_id, topic_id):
+    conn = sqlite3.connect('memory.db')
+    c = conn.cursor()
+    c.execute("SELECT role, content FROM topic_messages WHERE user_id = ? AND topic_id = ? ORDER BY timestamp DESC LIMIT 50",
+              (user_id, topic_id))
+    rows = c.fetchall()
+    conn.close()
+    return [{"role": r[0], "content": r[1]} for r in reversed(rows)]
+
+def save_topic_message(user_id, topic_id, role, content):
+    conn = sqlite3.connect('memory.db')
+    init_topics(conn)
+    c = conn.cursor()
+    c.execute("INSERT INTO topic_messages (user_id, topic_id, role, content) VALUES (?, ?, ?, ?)",
+              (user_id, topic_id, role, content))
+    conn.commit()
+    conn.close()
+
+def get_active_topic(context):
+    return context.user_data.get('active_topic_id'), context.user_data.get('active_topic_name')
+
+def set_active_topic(context, topic_id, name):
+    context.user_data['active_topic_id'] = topic_id
+    context.user_data['active_topic_name'] = name
+
+def clear_active_topic(context):
+    context.user_data.pop('active_topic_id', None)
+    context.user_data.pop('active_topic_name', None)
+
+
 async def send_subscribe_invoice(update: Update):
     """Отправить инвойс на оплату Stars"""
     await update.message.reply_invoice(
@@ -501,6 +734,15 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global GIF_FILE_ID
     user_id = update.effective_user.id
     username = update.effective_user.username or ""
+    # Проверяем лимит до регистрации (если юзер уже есть — пропускаем)
+    if user_id not in ADMIN_IDS:
+        row = get_user_status(user_id)
+        if not row and get_total_users() >= MAX_USERS:
+            await update.message.reply_text(
+                "Извини, набор закрыт — все места заняты 🙏\n\n"
+                "Напишу когда откроется следующий поток."
+            )
+            return
     register_user(user_id, username)
     if user_id in ADMIN_IDS:
         caption = "Привет! Я твой личный ассистент. Готов к работе 🚀"
@@ -559,7 +801,8 @@ async def check_access(update: Update) -> bool:
     elif reason == "expired":
         await update.message.reply_text(
             f"Твой пробный период закончился 😔\n\n"
-            f"Оформи подписку — {STARS_PRICE} ⭐️ в месяц:"
+            f"Оформи подписку — {STARS_PRICE} ⭐️ в месяц:\n\n"
+            "Или оставь фидбек: @BX_Supp_bot"
         )
         await send_subscribe_invoice(update)
     elif reason == "blocked":
@@ -572,6 +815,15 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_text = update.message.text
     # Handle keyboard buttons
+    if context.user_data.get('waiting_topic_name'):
+        del context.user_data['waiting_topic_name']
+        tid = create_topic(user_id, user_text)
+        set_active_topic(context, tid, user_text)
+        await update.message.reply_text(f"✅ Тема *{user_text}* создана и выбрана!", parse_mode="Markdown")
+        return
+    if user_text == "📂 Темы":
+        await cmd_topics(update, context)
+        return
     if user_text == "🎨 Генерация фото":
         await cmd_image(update, context)
         return
@@ -604,17 +856,31 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if needs_search(user_text):
             await update.message.reply_text("Ищу в интернете...")
             search_context = web_search(user_text)
-        save_message(user_id, "user", user_text)
-        await update_summary(user_id)
-        history = get_history(user_id)
-        if search_context:
-            history[-1]["content"] += f"\n\n[Результаты поиска]:\n{search_context}"
-        response = client.messages.create(
-            model="claude-sonnet-4-6", max_tokens=1000,
-            system=get_system(user_id), messages=history)
-        reply = response.content[0].text
-        save_message(user_id, "assistant", reply)
-        await update.message.reply_text(reply)
+        active_id, active_name = get_active_topic(context)
+        if active_id:
+            save_topic_message(user_id, active_id, "user", user_text)
+            history = get_topic_history(user_id, active_id)
+            if search_context:
+                history[-1]["content"] += f"\n\n[Результаты поиска]:\n{search_context}"
+            topic_system = get_system(user_id) + f"\n\nСейчас активна тема: {active_name}. Веди диалог в этом контексте."
+            response = client.messages.create(
+                model="claude-sonnet-4-6", max_tokens=1000,
+                system=topic_system, messages=history)
+            reply = response.content[0].text
+            save_topic_message(user_id, active_id, "assistant", reply)
+            await update.message.reply_text(f"[{active_name}] {reply}")
+        else:
+            save_message(user_id, "user", user_text)
+            await update_summary(user_id)
+            history = get_history(user_id)
+            if search_context:
+                history[-1]["content"] += f"\n\n[Результаты поиска]:\n{search_context}"
+            response = client.messages.create(
+                model="claude-sonnet-4-6", max_tokens=1000,
+                system=get_system(user_id), messages=history)
+            reply = response.content[0].text
+            save_message(user_id, "assistant", reply)
+            await update.message.reply_text(reply)
     except Exception as e:
         logger.error(f"Text error: {e}")
         await update.message.reply_text("Ошибка, попробуй ещё раз.")
@@ -645,6 +911,33 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Voice error: {e}")
         await update.message.reply_text("Ошибка с голосовым.")
 
+async def extract_video_frames(video_path: str, user_id: int, max_frames: int = 4) -> list:
+    """Extract frames from video, return list of base64 strings."""
+    frames = []
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", video_path],
+            capture_output=True, text=True
+        )
+        duration = float(result.stdout.strip() or "5")
+        interval = max(1, duration / max_frames)
+        for i in range(min(max_frames, int(duration))):
+            t = i * interval
+            frame_path = f"/tmp/frame_{user_id}_{i}.jpg"
+            subprocess.run(
+                ["ffmpeg", "-y", "-ss", str(t), "-i", video_path,
+                 "-vframes", "1", "-q:v", "3", "-vf", "scale=640:-1", frame_path],
+                capture_output=True
+            )
+            if os.path.exists(frame_path):
+                with open(frame_path, "rb") as f:
+                    frames.append(base64.standard_b64encode(f.read()).decode())
+                os.remove(frame_path)
+    except Exception as e:
+        logger.error(f"Frame extraction error: {e}")
+    return frames
+
 async def handle_media_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.animation:
         await handle_animation(update, context)
@@ -652,8 +945,12 @@ async def handle_media_video(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not await check_access(update):
         return
     user_id = update.effective_user.id
+    is_circle = update.message.video_note is not None
     try:
-        await update.message.reply_text("Видео получил, извлекаю звук...")
+        if is_circle:
+            await update.message.reply_text("Кружочек получил, анализирую...")
+        else:
+            await update.message.reply_text("Видео получил, извлекаю звук...")
         video = update.message.video_note or update.message.video
         if not video:
             await update.message.reply_text("Не понял тип видео.")
@@ -662,26 +959,61 @@ async def handle_media_video(update: Update, context: ContextTypes.DEFAULT_TYPE)
         video_path = f"/tmp/media_{user_id}.mp4"
         audio_path = f"/tmp/media_{user_id}.wav"
         await file.download_to_drive(video_path)
-        result = subprocess.run(
+
+        # Extract audio
+        audio_result = subprocess.run(
             ["ffmpeg", "-y", "-i", video_path, "-vn", "-ar", "16000", "-ac", "1", audio_path],
             capture_output=True, text=True)
+        speech_text = ""
+        if audio_result.returncode == 0 and os.path.exists(audio_path):
+            segments, _ = whisper.transcribe(audio_path, language="ru")
+            speech_text = " ".join([s.text for s in segments]).strip()
+            os.remove(audio_path)
+
+        # For video notes (circles) — also extract frames for visual analysis
+        visual_content = []
+        if is_circle:
+            frames = await extract_video_frames(video_path, user_id, max_frames=3)
+            for frame_b64 in frames:
+                visual_content.append({
+                    "type": "image",
+                    "source": {"type": "base64", "media_type": "image/jpeg", "data": frame_b64}
+                })
+
         os.remove(video_path)
-        if result.returncode != 0:
-            await update.message.reply_text("Ошибка извлечения звука.")
-            return
-        segments, _ = whisper.transcribe(audio_path, language="ru")
-        text = " ".join([s.text for s in segments])
-        os.remove(audio_path)
-        if not text.strip():
+
+        caption = update.message.caption or ""
+
+        if is_circle and visual_content:
+            # Full analysis: visual + speech
+            parts = visual_content.copy()
+            prompt = ""
+            if speech_text:
+                prompt += f"Речь в кружочке: {speech_text}\n\n"
+            prompt += caption or "Опиши что происходит в этом кружочке: кто там, что делает, что говорит, какая обстановка."
+            parts.append({"type": "text", "text": prompt})
+
+            messages = get_history(user_id) + [{"role": "user", "content": parts}]
+            response = client.messages.create(
+                model="claude-sonnet-4-6", max_tokens=1000,
+                system=get_system(user_id), messages=messages)
+            reply = response.content[0].text
+            if speech_text:
+                save_message(user_id, "user", f"[кружочек] {speech_text}")
+            else:
+                save_message(user_id, "user", "[кружочек без речи]")
+            save_message(user_id, "assistant", reply)
+            await update.message.reply_text(reply)
+        elif speech_text:
+            await update.message.reply_text(f"Распознал: {speech_text}")
+            save_message(user_id, "user", speech_text)
+            response = client.messages.create(model="claude-sonnet-4-6", max_tokens=1000,
+                                              system=get_system(user_id), messages=get_history(user_id))
+            reply = response.content[0].text
+            save_message(user_id, "assistant", reply)
+            await update.message.reply_text(reply)
+        else:
             await update.message.reply_text("Не смог распознать речь в видео.")
-            return
-        await update.message.reply_text(f"Распознал: {text}")
-        save_message(user_id, "user", text)
-        response = client.messages.create(model="claude-sonnet-4-6", max_tokens=1000,
-                                          system=get_system(user_id), messages=get_history(user_id))
-        reply = response.content[0].text
-        save_message(user_id, "assistant", reply)
-        await update.message.reply_text(reply)
     except Exception as e:
         logger.error(f"Media video error: {e}", exc_info=True)
         await update.message.reply_text("Ошибка с видео.")
@@ -708,8 +1040,43 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Photo error: {e}")
         await update.message.reply_text("Ошибка с фото.")
 
+GEN_KEYWORDS = [
+    'сгенерируй', 'сгенери', 'создай', 'нарисуй', 'generate', 'создайте',
+    'сделай картинку', 'сделай изображение', 'сделай фото', '360', 'арт',
+    'в стиле', 'превратись', 'превrati', 'render', 'draw', 'image of',
+    'создай персонажа', 'сделай персонажа', 'аниме', 'cartoon', 'мультяш'
+]
+
 async def handle_smart_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_access(update):
+        return
+    caption = (update.message.caption or "").lower()
+    # Check if caption has generation intent
+    if any(kw in caption for kw in GEN_KEYWORDS):
+        user_id = update.effective_user.id
+        allowed, reason = can_generate_image(user_id)
+        if not allowed:
+            await update.message.reply_text(
+                "🔒 Генерация по подписке.\n"
+                f"Оформи за {STARS_PRICE} ⭐️/мес — /subscribe"
+            )
+            return
+        # Use photo as reference, caption as prompt
+        await update.message.reply_text("🎨 Понял, генерирую по твоей фотке...")
+        photo = update.message.photo[-1]
+        file = await context.bot.get_file(photo.file_id)
+        file_bytes = await file.download_as_bytearray()
+        img_ref = base64.standard_b64encode(file_bytes).decode()
+        prompt = update.message.caption or "Create a stylized image based on this photo"
+        # Ask for aspect ratio
+        keyboard = [[
+            InlineKeyboardButton("1:1 📷", callback_data="ratio_1:1"),
+            InlineKeyboardButton("16:9 🖥", callback_data="ratio_16:9"),
+            InlineKeyboardButton("9:16 📱", callback_data="ratio_9:16"),
+        ]]
+        context.user_data["prompt"] = prompt
+        context.user_data["img_ref"] = img_ref
+        await update.message.reply_text("Выбери формат:", reply_markup=InlineKeyboardMarkup(keyboard))
         return
     await handle_photo(update, context)
 
@@ -785,7 +1152,11 @@ app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 img_conv = ConversationHandler(
     entry_points=[CommandHandler("image", cmd_image)],
     states={
-        IMG_PROMPT: [MessageHandler(filters.PHOTO | (filters.TEXT & ~filters.COMMAND), img_receive_prompt)],
+        IMG_PHOTO: [
+            MessageHandler(filters.PHOTO, img_receive_photo),
+            CallbackQueryHandler(img_skip_photo_callback, pattern="^img_skip_photo$"),
+        ],
+        IMG_PROMPT: [MessageHandler(filters.TEXT & ~filters.COMMAND, img_receive_prompt)],
         IMG_SETTINGS: [CallbackQueryHandler(img_settings_callback, pattern="^ratio_")],
     },
     fallbacks=[CommandHandler("cancel", cmd_cancel)],
@@ -803,6 +1174,8 @@ vid_conv = ConversationHandler(
 app.add_handler(img_conv)
 app.add_handler(vid_conv)
 
+app.add_handler(CommandHandler("topics", cmd_topics))
+app.add_handler(CallbackQueryHandler(topics_callback, pattern="^topic_"))
 app.add_handler(CommandHandler("start", cmd_start))
 app.add_handler(CommandHandler("subscribe", cmd_subscribe))
 app.add_handler(CommandHandler("getid", cmd_getid))
@@ -814,5 +1187,11 @@ app.add_handler(MessageHandler(filters.ANIMATION, handle_animation))
 app.add_handler(MessageHandler((filters.VIDEO & ~filters.ANIMATION) | filters.VIDEO_NOTE, handle_media_video))
 app.add_handler(MessageHandler(filters.PHOTO, handle_smart_photo))
 app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
-print("Бот запущен v7 — генерация фото/видео")
+print("Бот запущен v8 — уведомления подписки")
+# Schedule daily subscription check at 10:00 UTC
+import datetime as dt
+app.job_queue.run_daily(
+    check_expiring_subscriptions,
+    time=dt.time(hour=10, minute=0, tzinfo=timezone.utc)
+)
 app.run_polling()
