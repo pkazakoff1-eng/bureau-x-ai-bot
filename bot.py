@@ -11,6 +11,7 @@ from datetime import datetime, timezone, timedelta
 import asyncio
 import httpx
 from telegram import Update, LabeledPrice, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
+from telegram.constants import ChatAction
 from telegram.ext import (ApplicationBuilder, MessageHandler, CommandHandler,
                           PreCheckoutQueryHandler, ConversationHandler,
                           CallbackQueryHandler, filters, ContextTypes)
@@ -928,6 +929,99 @@ async def vid_settings_callback(update: Update, context: ContextTypes.DEFAULT_TY
         await query.message.reply_text(f"Error: {e}")
     return ConversationHandler.END
 
+
+async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_access(update):
+        return
+    user_id = update.effective_user.id
+    lang = get_lang(user_id)
+    conn = sqlite3.connect('memory.db')
+    c = conn.cursor()
+    c.execute("DELETE FROM messages WHERE user_id = ?", (user_id,))
+    c.execute("DELETE FROM summaries WHERE user_id = ?", (user_id,))
+    conn.commit()
+    conn.close()
+    context.user_data.clear()
+    msgs = {"en": "History cleared. Starting fresh.", "ru": "История очищена. Начинаем с чистого листа."}
+    await update.message.reply_text(msgs.get(lang, msgs["ru"]))
+
+async def cmd_memory(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_access(update):
+        return
+    user_id = update.effective_user.id
+    lang = get_lang(user_id)
+    prefs = get_prefs(user_id)
+    summary = get_summary(user_id)
+    msg_count = get_message_count(user_id)
+    lines = []
+    if lang == "en":
+        lines += ["*What I remember:*", "", "Messages: " + str(msg_count)]
+        if summary:
+            lines += ["", "*Summary:*", summary]
+        if prefs:
+            lines += ["", "*Preferences:*", prefs]
+        if not summary and not prefs:
+            lines.append("Nothing yet. Keep chatting.")
+    else:
+        lines += ["*Что я о тебе знаю:*", "", "Сообщений: " + str(msg_count)]
+        if summary:
+            lines += ["", "*Резюме:*", summary]
+        if prefs:
+            lines += ["", "*Предпочтения:*", prefs]
+        if not summary and not prefs:
+            lines.append("Пока ничего. Общайся — буду запоминать.")
+    await update.message.reply_text(chr(10).join(lines), parse_mode="Markdown")
+
+async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMIN_IDS:
+        return
+    conn = sqlite3.connect('memory.db')
+    c = conn.cursor()
+    c.execute("SELECT user_id, username, status, trial_start, expires_at, image_count FROM users")
+    users = c.fetchall()
+    conn.close()
+    lines = ["*Пользователи бота:*", ""]
+    for uid, uname, status, trial, expires, imgs in users:
+        crown = "👑 " if uid in ADMIN_IDS else ""
+        name = "@" + uname if uname else str(uid)
+        exp = expires[:10] if expires else ((trial[:10] + " (триал)") if trial else "—")
+        lines.append(crown + name + " | " + status + " | до " + exp + " | фото: " + str(imgs))
+    lines += ["", "Всего: " + str(len(users)) + " | Лимит: " + str(MAX_USERS), "", "/activate ID — активировать", "/block ID — заблокировать"]
+    await update.message.reply_text(chr(10).join(lines), parse_mode="Markdown")
+
+async def cmd_activate(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMIN_IDS:
+        return
+    if not context.args:
+        await update.message.reply_text("Использование: /activate USER_ID")
+        return
+    try:
+        target_id = int(context.args[0])
+        expires = activate_subscription(target_id)
+        await update.message.reply_text("Подписка активирована до " + expires.strftime("%d.%m.%Y"))
+        try:
+            await context.bot.send_message(target_id, "Подписка активирована! Пиши в любое время.")
+        except Exception:
+            pass
+    except ValueError:
+        await update.message.reply_text("Неверный ID")
+
+async def cmd_block(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMIN_IDS:
+        return
+    if not context.args:
+        await update.message.reply_text("Использование: /block USER_ID")
+        return
+    try:
+        target_id = int(context.args[0])
+        conn = sqlite3.connect('memory.db')
+        c = conn.cursor()
+        c.execute("UPDATE users SET status='blocked' WHERE user_id=?", (target_id,))
+        conn.commit()
+        conn.close()
+        await update.message.reply_text("Пользователь заблокирован.")
+    except ValueError:
+        await update.message.reply_text("Неверный ID")
 async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lang = get_lang(update.effective_user.id)
     context.user_data.clear()
@@ -1125,6 +1219,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(t(lang, 'remembered'))
             return
 
+        await update.message.reply_chat_action(ChatAction.TYPING)
         search_context = ""
         if needs_search(user_text, lang):
             await update.message.reply_text(t(lang, 'searching'))
@@ -1186,6 +1281,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     lang = get_lang(user_id)
     try:
+        await update.message.reply_chat_action(ChatAction.TYPING)
         await update.message.reply_text(t(lang, 'voice_received'))
         file = await context.bot.get_file(update.message.voice.file_id)
         path = f"/tmp/voice_{user_id}.ogg"
@@ -1310,6 +1406,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     lang = get_lang(user_id)
     try:
+        await update.message.reply_chat_action(ChatAction.TYPING)
         await update.message.reply_text(t(lang, 'photo_received'))
         photo = update.message.photo[-1]
         file = await context.bot.get_file(photo.file_id)
@@ -1463,6 +1560,11 @@ app.add_handler(CommandHandler("start", cmd_start))
 app.add_handler(CommandHandler("language", cmd_language))
 app.add_handler(CommandHandler("subscribe", cmd_subscribe))
 app.add_handler(CommandHandler("getid", cmd_getid))
+app.add_handler(CommandHandler("reset", cmd_reset))
+app.add_handler(CommandHandler("memory", cmd_memory))
+app.add_handler(CommandHandler("admin", cmd_admin))
+app.add_handler(CommandHandler("activate", cmd_activate))
+app.add_handler(CommandHandler("block", cmd_block))
 app.add_handler(PreCheckoutQueryHandler(pre_checkout))
 app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment))
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
@@ -1471,7 +1573,7 @@ app.add_handler(MessageHandler(filters.ANIMATION, handle_animation))
 app.add_handler(MessageHandler((filters.VIDEO & ~filters.ANIMATION) | filters.VIDEO_NOTE, handle_media_video))
 app.add_handler(MessageHandler(filters.PHOTO, handle_smart_photo))
 app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
-print("Bot started v9 — i18n ru/en")
+print("Bot started v10 — typing + reset + memory + admin")
 import datetime as dt
 app.job_queue.run_daily(
     check_expiring_subscriptions,
