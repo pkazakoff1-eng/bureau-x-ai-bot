@@ -29,6 +29,26 @@ TAVILY_KEY = os.getenv("TAVILY_KEY", "")
 ADMIN_IDS = {285198612, 587290278}
 WAVESPEED_KEY = os.getenv("WAVESPEED_API_KEY", "")
 
+
+# ── Rate limiting ────────────────────────────────────────────────────────────
+from collections import defaultdict
+import time as _time
+
+_rate_data = defaultdict(list)  # user_id -> [timestamps]
+RATE_LIMIT = 10   # messages
+RATE_WINDOW = 60  # seconds
+
+def is_rate_limited(user_id: int) -> bool:
+    if user_id in ADMIN_IDS:
+        return False
+    now = _time.time()
+    window = _rate_data[user_id]
+    # Drop old entries
+    _rate_data[user_id] = [t for t in window if now - t < RATE_WINDOW]
+    if len(_rate_data[user_id]) >= RATE_LIMIT:
+        return True
+    _rate_data[user_id].append(now)
+    return False
 # ── Strings / i18n ────────────────────────────────────────────────────────────
 STRINGS = {
     'ru': {
@@ -1363,6 +1383,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lang = get_lang(user_id)
     user_text = update.message.text
 
+    if is_rate_limited(user_id):
+        lang = get_lang(user_id)
+        msg = 'Полегче! Не более 10 сообщений в минуту.' if lang == 'ru' else 'Slow down! Max 10 messages per minute.'
+        await update.message.reply_text(msg)
+        return
     if context.user_data.get('waiting_topic_name'):
         del context.user_data['waiting_topic_name']
         tid = create_topic(user_id, user_text)
@@ -1806,7 +1831,7 @@ app.add_handler(MessageHandler(filters.ANIMATION, handle_animation))
 app.add_handler(MessageHandler((filters.VIDEO & ~filters.ANIMATION) | filters.VIDEO_NOTE, handle_media_video))
 app.add_handler(MessageHandler(filters.PHOTO, handle_smart_photo))
 app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
-print("Bot started v12 — onboarding")
+print("Bot started v13 — rate limiting")
 import datetime as dt
 app.job_queue.run_repeating(check_reminders, interval=60, first=10)
 app.job_queue.run_daily(
