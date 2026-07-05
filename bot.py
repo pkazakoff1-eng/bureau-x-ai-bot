@@ -35,6 +35,7 @@ STRINGS = {
         'btn_topics': '📂 Темы',
         'btn_sub': '💳 Подписка',
         'btn_help': '❓ Помощь',
+        'btn_lang': '🌐 Язык',
         'kb_placeholder': 'Напиши сообщение или выбери действие...',
         'start_admin': 'Привет! Я твой личный ассистент. Готов к работе 🚀',
         'start_user': (
@@ -131,6 +132,7 @@ STRINGS = {
         'btn_topics': '📂 Topics',
         'btn_sub': '💳 Subscription',
         'btn_help': '❓ Help',
+        'btn_lang': '🌐 Language',
         'kb_placeholder': 'Type a message or choose an action...',
         'start_admin': 'Hi! I\'m your personal assistant. Ready to go 🚀',
         'start_user': (
@@ -237,7 +239,8 @@ def make_keyboard(lang: str) -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         [
             [KeyboardButton(t(lang, 'btn_image')), KeyboardButton(t(lang, 'btn_video'))],
-            [KeyboardButton(t(lang, 'btn_topics')), KeyboardButton(t(lang, 'btn_sub')), KeyboardButton(t(lang, 'btn_help'))],
+            [KeyboardButton(t(lang, 'btn_topics')), KeyboardButton(t(lang, 'btn_sub'))],
+            [KeyboardButton(t(lang, 'btn_help')), KeyboardButton(t(lang, 'btn_lang'))],
         ],
         resize_keyboard=True,
         input_field_placeholder=t(lang, 'kb_placeholder')
@@ -1068,6 +1071,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if user_text in btn_help_vals:
         await update.message.reply_text(t(lang, 'help_text'))
+        return
+    btn_lang_vals = {STRINGS['ru']['btn_lang'], STRINGS['en']['btn_lang']}
+    if user_text in btn_lang_vals:
+        await cmd_language(update, context)
         return
 
     try:
