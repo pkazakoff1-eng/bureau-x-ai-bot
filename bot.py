@@ -27,21 +27,228 @@ TAVILY_KEY = os.getenv("TAVILY_KEY", "")
 ADMIN_IDS = {285198612, 587290278}
 WAVESPEED_KEY = os.getenv("WAVESPEED_API_KEY", "")
 
-MAIN_KEYBOARD = ReplyKeyboardMarkup(
-    [
-        [KeyboardButton("🎨 Генерация фото"), KeyboardButton("🎬 Генерация видео")],
-        [KeyboardButton("📂 Темы"), KeyboardButton("💳 Подписка"), KeyboardButton("❓ Помощь")],
-    ],
-    resize_keyboard=True,
-    input_field_placeholder="Напиши сообщение или выбери действие..."
-)
+# ── Strings / i18n ────────────────────────────────────────────────────────────
+STRINGS = {
+    'ru': {
+        'btn_image': '🎨 Генерация фото',
+        'btn_video': '🎬 Генерация видео',
+        'btn_topics': '📂 Темы',
+        'btn_sub': '💳 Подписка',
+        'btn_help': '❓ Помощь',
+        'kb_placeholder': 'Напиши сообщение или выбери действие...',
+        'start_admin': 'Привет! Я твой личный ассистент. Готов к работе 🚀',
+        'start_user': (
+            'Привет! Я персональный AI-ассистент.\n\n'
+            'У тебя есть {days} дней бесплатного доступа ко всем функциям.\n\n'
+            'Просто пиши — отвечу, расшифрую голосовые и видео, разберу фото и PDF, найду в интернете.\n'
+            'Для генерации используй команды:\n'
+            '/image — сгенерировать изображение\n'
+            '/video — создать видео из фото\n\n'
+            'После пробного периода — подписка {price} ⭐️ в месяц.'
+        ),
+        'start_closed': 'Извини, набор закрыт — все места заняты 🙏\n\nНапишу когда откроется следующий поток.',
+        'help_text': (
+            'Просто напиши мне что угодно — отвечу.\n\n'
+            'Также умею:\n'
+            '🎤 Голосовые и кружочки — расшифрую\n'
+            '📷 Фото и PDF — проанализирую\n'
+            '🌐 Веб-поиск — найду актуальное\n'
+            '🎨 /image — генерация изображения\n'
+            '🎬 /video — генерация видео из фото\n'
+            '💳 /subscribe — подписка'
+        ),
+        'access_not_registered': 'Напиши /start чтобы начать.',
+        'access_expired': 'Твой пробный период закончился 😔\n\nОформи подписку — {price} ⭐️ в месяц:\n\nИли оставь фидбек: @BX_Supp_bot',
+        'access_blocked': 'Доступ ограничен.',
+        'sub_admin': 'У тебя безлимитный доступ 😎',
+        'sub_title': 'Подписка на 30 дней',
+        'sub_desc': 'Полный доступ к AI-ассистенту на 30 дней',
+        'sub_label': '30 дней доступа',
+        'payment_ok': '✅ Оплата прошла! Доступ открыт до {date}.\n\nСпасибо! Пиши мне в любое время 🚀',
+        'img_start': '🎨 *Генерация изображения*\n\nШаг 1: Прикрепи фото как референс.\nИли нажми Пропустить, чтобы генерировать с нуля.',
+        'img_skip_btn': '⏭ Пропустить',
+        'img_got_photo': '✅ Фото получил!\n\nШаг 2: Напиши промт — что именно сгенерировать?',
+        'img_need_photo': 'Отправь фото или нажми Пропустить.',
+        'img_skip_msg': 'Шаг 2: Напиши промт — что сгенерировать?',
+        'img_choose_ratio': '✅ Промт: _{prompt}_\n\nШаг 3: Выбери формат:',
+        'img_no_sub': '🔒 Генерация изображений доступна по подписке.\nОформи за {price} ⭐️/месяц — /subscribe',
+        'img_generating': '⏳ Генерирую ({ratio}){notice}...',
+        'img_free_notice': ' (бесплатная попытка)',
+        'vid_start': '🎬 *Генерация видео*\n\nОтправь фото — из него сделаем видео.',
+        'vid_need_photo': 'Нужно фото. Отправь изображение.',
+        'vid_got_photo': '📸 Фото получил!\n\nНапиши промт — что должно происходить в видео.\nИли отправь /skip для автоматического движения.',
+        'vid_settings': '⚙️ Выбери параметры видео:',
+        'vid_no_sub': '🔒 Генерация видео доступна только по подписке.\nОформи за {price} ⭐️/месяц — /subscribe',
+        'vid_generating': '⏳ Генерирую видео {dur} сек / {res}, ~30-90 сек...',
+        'cancelled': 'Отменено.',
+        'topics_header': '📂 *Мои темы*\n{current}\n\nВыбери тему или создай новую:',
+        'topics_current': 'Сейчас: *{name}*',
+        'topics_general': 'Сейчас: общий чат',
+        'topics_type_name': 'Напиши название новой темы:',
+        'topics_exited': 'Вышел из темы. Теперь общий чат.',
+        'topics_create_btn': '+ Создать тему',
+        'topics_exit_btn': '❌ Выйти из темы',
+        'topics_selected': '✅ Тема: *{name}*\n\nПиши — отвечу в контексте этой темы.',
+        'topics_deleted': '🗑 Тема удалена.\n\nВыбери тему:',
+        'topics_created': '✅ Тема *{name}* создана и выбрана!',
+        'voice_received': 'Голосовое получил, транскрибирую...',
+        'voice_no_speech': 'Не смог распознать.',
+        'voice_recognized': 'Распознал: {text}',
+        'voice_error': 'Ошибка с голосовым.',
+        'photo_received': 'Фото получил, анализирую...',
+        'photo_caption': 'Опиши подробно что на этом фото. Только анализ изображения, без генерации.',
+        'photo_error': 'Ошибка с фото.',
+        'gen_photo_confirm': '🎨 Понял, генерирую по твоей фотке...',
+        'gen_choose_ratio': 'Выбери формат:',
+        'gen_no_sub': '🔒 Генерация по подписке.\nОформи за {price} ⭐️/мес — /subscribe',
+        'video_circle_received': 'Кружочек получил, анализирую...',
+        'video_received': 'Видео получил, извлекаю звук...',
+        'video_unknown': 'Не понял тип видео.',
+        'video_no_speech': 'Не смог распознать речь в видео.',
+        'video_error': 'Ошибка с видео.',
+        'circle_prompt': 'Опиши что происходит в этом кружочке: кто там, что делает, что говорит, какая обстановка.',
+        'doc_pdf_received': 'PDF получил, читаю...',
+        'doc_pdf_prompt': 'Проанализируй этот документ подробно.',
+        'doc_img_received': 'Изображение получил, анализирую...',
+        'doc_img_question': 'Что на этом изображении?',
+        'doc_unsupported': 'Пока умею читать только PDF и изображения.',
+        'doc_error': 'Ошибка с файлом.',
+        'remembered': 'Запомнил!',
+        'searching': 'Ищу в интернете...',
+        'error_retry': 'Ошибка, попробуй ещё раз.',
+        'lang_choose': '🌐 Выбери язык / Choose language:',
+        'lang_set_ru': '✅ Язык установлен: Русский 🇷🇺',
+        'lang_set_en': '✅ Language set: English 🇬🇧',
+        'notify_expiring': '⏰ Подписка заканчивается через 3 дня.\n\nПродли сейчас чтобы не прерываться — /subscribe',
+        'notify_expired': '😔 Подписка закончилась.\n\nОформи снова — {price} ⭐️/мес: /subscribe\n\nИли оставь фидбек: @BX_Supp_bot',
+        'search_keywords': ['найди', 'поищи', 'что сейчас', 'актуально', 'последние', 'новости',
+                            'цена', 'стоимость', 'требования', 'правила', 'как сейчас', 'узнай', 'проверь'],
+        'remember_keywords': ['запомни что', 'запомни:', 'всегда', 'никогда не'],
+    },
+    'en': {
+        'btn_image': '🎨 Generate image',
+        'btn_video': '🎬 Generate video',
+        'btn_topics': '📂 Topics',
+        'btn_sub': '💳 Subscription',
+        'btn_help': '❓ Help',
+        'kb_placeholder': 'Type a message or choose an action...',
+        'start_admin': 'Hi! I\'m your personal assistant. Ready to go 🚀',
+        'start_user': (
+            'Hi! I\'m your personal AI assistant.\n\n'
+            'You have {days} days of free access to all features.\n\n'
+            'Just write — I\'ll reply, transcribe voice and video, analyze photos and PDFs, search the web.\n'
+            'For generation use commands:\n'
+            '/image — generate an image\n'
+            '/video — create video from photo\n\n'
+            'After the trial — subscription {price} ⭐️/month.'
+        ),
+        'start_closed': 'Sorry, registration is closed — all spots are taken 🙏\n\nI\'ll notify you when the next wave opens.',
+        'help_text': (
+            'Just write me anything — I\'ll respond.\n\n'
+            'I can also:\n'
+            '🎤 Voice & video notes — transcribe\n'
+            '📷 Photos & PDFs — analyze\n'
+            '🌐 Web search — find current info\n'
+            '🎨 /image — generate an image\n'
+            '🎬 /video — generate video from photo\n'
+            '💳 /subscribe — subscription'
+        ),
+        'access_not_registered': 'Send /start to begin.',
+        'access_expired': 'Your trial period is over 😔\n\nGet a subscription — {price} ⭐️/month:\n\nOr leave feedback: @BX_Supp_bot',
+        'access_blocked': 'Access restricted.',
+        'sub_admin': 'You have unlimited access 😎',
+        'sub_title': '30-day subscription',
+        'sub_desc': 'Full access to the AI assistant for 30 days',
+        'sub_label': '30 days access',
+        'payment_ok': '✅ Payment received! Access open until {date}.\n\nThank you! Write to me anytime 🚀',
+        'img_start': '🎨 *Image generation*\n\nStep 1: Attach a reference photo.\nOr tap Skip to generate from scratch.',
+        'img_skip_btn': '⏭ Skip',
+        'img_got_photo': '✅ Photo received!\n\nStep 2: Write a prompt — what should be generated?',
+        'img_need_photo': 'Send a photo or tap Skip.',
+        'img_skip_msg': 'Step 2: Write a prompt — what to generate?',
+        'img_choose_ratio': '✅ Prompt: _{prompt}_\n\nStep 3: Choose format:',
+        'img_no_sub': '🔒 Image generation requires a subscription.\nGet one for {price} ⭐️/month — /subscribe',
+        'img_generating': '⏳ Generating ({ratio}){notice}...',
+        'img_free_notice': ' (free attempt)',
+        'vid_start': '🎬 *Video generation*\n\nSend a photo — we\'ll turn it into a video.',
+        'vid_need_photo': 'A photo is required. Send an image.',
+        'vid_got_photo': '📸 Photo received!\n\nWrite a prompt — what should happen in the video.\nOr send /skip for automatic motion.',
+        'vid_settings': '⚙️ Choose video settings:',
+        'vid_no_sub': '🔒 Video generation requires a subscription.\nGet one for {price} ⭐️/month — /subscribe',
+        'vid_generating': '⏳ Generating video {dur}s / {res}, ~30-90s...',
+        'cancelled': 'Cancelled.',
+        'topics_header': '📂 *My topics*\n{current}\n\nSelect a topic or create a new one:',
+        'topics_current': 'Now: *{name}*',
+        'topics_general': 'Now: general chat',
+        'topics_type_name': 'Enter the new topic name:',
+        'topics_exited': 'Exited topic. Back to general chat.',
+        'topics_create_btn': '+ Create topic',
+        'topics_exit_btn': '❌ Exit topic',
+        'topics_selected': '✅ Topic: *{name}*\n\nWrite — I\'ll reply in this topic\'s context.',
+        'topics_deleted': '🗑 Topic deleted.\n\nSelect a topic:',
+        'topics_created': '✅ Topic *{name}* created and selected!',
+        'voice_received': 'Voice message received, transcribing...',
+        'voice_no_speech': 'Could not recognize speech.',
+        'voice_recognized': 'Recognized: {text}',
+        'voice_error': 'Error processing voice message.',
+        'photo_received': 'Photo received, analyzing...',
+        'photo_caption': 'Describe in detail what is in this photo. Analysis only, no generation.',
+        'photo_error': 'Error processing photo.',
+        'gen_photo_confirm': '🎨 Got it, generating from your photo...',
+        'gen_choose_ratio': 'Choose format:',
+        'gen_no_sub': '🔒 Generation requires a subscription.\nGet one for {price} ⭐️/month — /subscribe',
+        'video_circle_received': 'Video note received, analyzing...',
+        'video_received': 'Video received, extracting audio...',
+        'video_unknown': 'Unknown video type.',
+        'video_no_speech': 'Could not recognize speech in the video.',
+        'video_error': 'Error processing video.',
+        'circle_prompt': 'Describe what is happening in this video note: who is there, what they are doing, what they say, the setting.',
+        'doc_pdf_received': 'PDF received, reading...',
+        'doc_pdf_prompt': 'Analyze this document in detail.',
+        'doc_img_received': 'Image received, analyzing...',
+        'doc_img_question': 'What is in this image?',
+        'doc_unsupported': 'I can only read PDFs and images for now.',
+        'doc_error': 'Error processing file.',
+        'remembered': 'Got it, remembered!',
+        'searching': 'Searching the web...',
+        'error_retry': 'Error, please try again.',
+        'lang_choose': '🌐 Выбери язык / Choose language:',
+        'lang_set_ru': '✅ Язык установлен: Русский 🇷🇺',
+        'lang_set_en': '✅ Language set: English 🇬🇧',
+        'notify_expiring': '⏰ Your subscription expires in 3 days.\n\nRenew now to avoid interruptions — /subscribe',
+        'notify_expired': '😔 Your subscription has expired.\n\nRenew — {price} ⭐️/month: /subscribe\n\nOr leave feedback: @BX_Supp_bot',
+        'search_keywords': ['find', 'search', 'look up', 'current', 'latest', 'news',
+                            'price', 'cost', 'requirements', 'rules', 'how now', 'check'],
+        'remember_keywords': ['remember that', 'remember:', 'always', 'never'],
+    }
+}
+
+def t(lang: str, key: str, **kwargs) -> str:
+    """Get translated string."""
+    s = STRINGS.get(lang, STRINGS['ru']).get(key, STRINGS['ru'].get(key, key))
+    if kwargs:
+        try:
+            s = s.format(**kwargs)
+        except Exception:
+            pass
+    return s
+
+def make_keyboard(lang: str) -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        [
+            [KeyboardButton(t(lang, 'btn_image')), KeyboardButton(t(lang, 'btn_video'))],
+            [KeyboardButton(t(lang, 'btn_topics')), KeyboardButton(t(lang, 'btn_sub')), KeyboardButton(t(lang, 'btn_help'))],
+        ],
+        resize_keyboard=True,
+        input_field_placeholder=t(lang, 'kb_placeholder')
+    )
 
 # Conversation states
 IMG_PHOTO, IMG_PROMPT, IMG_SETTINGS = range(3)
 VID_PHOTO, VID_PROMPT, VID_SETTINGS = range(3, 6)
 TRIAL_DAYS = 5
-MAX_USERS = 5  # лимит тестировщиков
-STARS_PRICE = 200       # Stars за 30 дней (~$2)
+MAX_USERS = 5
+STARS_PRICE = 200
 SUB_DAYS = 30
 
 client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
@@ -65,13 +272,29 @@ def init_db():
         trial_start DATETIME DEFAULT CURRENT_TIMESTAMP,
         expires_at DATETIME DEFAULT NULL,
         username TEXT DEFAULT '',
-        image_count INTEGER DEFAULT 0
+        image_count INTEGER DEFAULT 0,
+        language TEXT DEFAULT 'ru'
     )''')
-    # migrate: add image_count if missing
-    try:
-        c.execute('ALTER TABLE users ADD COLUMN image_count INTEGER DEFAULT 0')
-    except:
-        pass
+    for col, default in [('image_count', '0'), ('language', "'ru'"), ('expires_at', 'NULL')]:
+        try:
+            c.execute(f'ALTER TABLE users ADD COLUMN {col} {"INTEGER" if col == "image_count" else "TEXT"} DEFAULT {default}')
+        except:
+            pass
+    conn.commit()
+    conn.close()
+
+def get_lang(user_id: int) -> str:
+    conn = sqlite3.connect('memory.db')
+    c = conn.cursor()
+    c.execute("SELECT language FROM users WHERE user_id = ?", (user_id,))
+    row = c.fetchone()
+    conn.close()
+    return (row[0] or 'ru') if row else 'ru'
+
+def set_lang(user_id: int, lang: str):
+    conn = sqlite3.connect('memory.db')
+    c = conn.cursor()
+    c.execute("UPDATE users SET language = ? WHERE user_id = ?", (lang, user_id))
     conn.commit()
     conn.close()
 
@@ -103,7 +326,6 @@ def activate_subscription(user_id):
     conn = sqlite3.connect('memory.db')
     c = conn.cursor()
     now = datetime.now(timezone.utc)
-    # Если уже есть активная подписка — продлеваем от текущего expires_at
     c.execute("SELECT expires_at FROM users WHERE user_id = ?", (user_id,))
     row = c.fetchone()
     if row and row[0]:
@@ -140,7 +362,6 @@ def is_allowed(user_id):
             if datetime.now(timezone.utc) > exp:
                 return False, "expired"
         return True, None
-    # trial
     start = datetime.fromisoformat(trial_start)
     if start.tzinfo is None:
         start = start.replace(tzinfo=timezone.utc)
@@ -203,9 +424,8 @@ def save_prefs(user_id, prefs):
     conn.commit()
     conn.close()
 
-def needs_search(text):
-    keywords = ['найди', 'поищи', 'что сейчас', 'актуально', 'последние', 'новости',
-                'цена', 'стоимость', 'требования', 'правила', 'как сейчас', 'узнай', 'проверь']
+def needs_search(text, lang='ru'):
+    keywords = STRINGS[lang].get('search_keywords', STRINGS['ru']['search_keywords'])
     return any(word in text.lower() for word in keywords)
 
 def web_search(query):
@@ -229,6 +449,7 @@ async def update_summary(user_id):
 def get_system(user_id):
     prefs = get_prefs(user_id)
     summary = get_summary(user_id)
+    lang = get_lang(user_id)
     if user_id in ADMIN_IDS:
         system = """Ты личный семейный ассистент и проджект-менеджер.
 
@@ -242,6 +463,10 @@ def get_system(user_id):
 Ты умеешь анализировать фото и документы.
 Если в контексте есть результаты поиска — используй их для ответа.
 Отвечай кратко и по делу."""
+    elif lang == 'en':
+        system = """You are a smart personal assistant.
+You can answer questions, analyze photos and documents, and search the internet.
+Reply concisely and to the point. Always respond in English."""
     else:
         system = """Ты умный персональный ассистент.
 Ты умеешь отвечать на вопросы, анализировать фото и документы, искать информацию в интернете.
@@ -252,8 +477,6 @@ def get_system(user_id):
     if prefs:
         system += f"\n\nПредпочтения пользователя:\n{prefs}"
     return system
-
-
 
 def get_image_count(user_id):
     conn = sqlite3.connect('memory.db')
@@ -271,7 +494,6 @@ def increment_image_count(user_id):
     conn.close()
 
 def can_generate_image(user_id):
-    """Admins: unlimited. Active sub: unlimited. Trial/free: 1 free image."""
     if user_id in ADMIN_IDS:
         return True, None
     row = get_user_status(user_id)
@@ -280,21 +502,18 @@ def can_generate_image(user_id):
     status, _, expires_at = row
     if status == "active":
         if expires_at:
-            from datetime import datetime, timezone
             exp = datetime.fromisoformat(expires_at)
             if exp.tzinfo is None:
                 exp = exp.replace(tzinfo=timezone.utc)
             if datetime.now(timezone.utc) > exp:
                 return False, "no_sub"
         return True, None
-    # trial or expired — 1 free image
     count = get_image_count(user_id)
     if count < 3:
         return True, "free_image"
     return False, "no_sub"
 
 def can_generate_video(user_id):
-    """Admins: unlimited. Active sub only."""
     if user_id in ADMIN_IDS:
         return True, None
     row = get_user_status(user_id)
@@ -303,7 +522,6 @@ def can_generate_video(user_id):
     status, _, expires_at = row
     if status == "active":
         if expires_at:
-            from datetime import datetime, timezone
             exp = datetime.fromisoformat(expires_at)
             if exp.tzinfo is None:
                 exp = exp.replace(tzinfo=timezone.utc)
@@ -313,13 +531,12 @@ def can_generate_video(user_id):
     return False, "no_sub"
 
 async def wavespeed_request(endpoint: str, payload: dict) -> str:
-    """POST to Wavespeed, poll until done, return output URL."""
     headers = {
         "Authorization": f"Bearer {WAVESPEED_KEY}",
         "Content-Type": "application/json"
     }
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.post(
+    async with httpx.AsyncClient(timeout=30) as http:
+        resp = await http.post(
             f"https://api.wavespeed.ai/api/v3/{endpoint}",
             json=payload, headers=headers
         )
@@ -329,7 +546,7 @@ async def wavespeed_request(endpoint: str, payload: dict) -> str:
             raise Exception(f"API error: {data}")
         for _ in range(90):
             await asyncio.sleep(2)
-            poll = await client.get(
+            poll = await http.get(
                 f"https://api.wavespeed.ai/api/v3/predictions/{request_id}",
                 headers=headers
             )
@@ -344,332 +561,32 @@ async def wavespeed_request(endpoint: str, payload: dict) -> str:
                 raise Exception(result.get("data", {}).get("error", "Unknown error"))
         raise Exception("Generation timeout")
 
+# ── /language command ─────────────────────────────────────────────────────────
 
+async def cmd_language(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("🇷🇺 Русский", callback_data="setlang_ru"),
+        InlineKeyboardButton("🇬🇧 English", callback_data="setlang_en"),
+    ]])
+    lang = get_lang(update.effective_user.id)
+    await update.message.reply_text(t(lang, 'lang_choose'), reply_markup=keyboard)
+
+async def lang_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    new_lang = query.data.replace("setlang_", "")
+    set_lang(user_id, new_lang)
+    msg = t(new_lang, 'lang_set_ru') if new_lang == 'ru' else t(new_lang, 'lang_set_en')
+    await query.edit_message_text(msg)
+    # Send updated keyboard
+    await context.bot.send_message(
+        chat_id=user_id,
+        text="👇",
+        reply_markup=make_keyboard(new_lang)
+    )
 
 # ── Topics ────────────────────────────────────────────────────────────────────
-
-CREATE_TOPIC = 10
-
-async def cmd_topics(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await check_access(update):
-        return
-    user_id = update.effective_user.id
-    topics = get_topics(user_id)
-    active_id, active_name = get_active_topic(context)
-
-    keyboard = []
-    for tid, name in topics:
-        marker = "✅ " if tid == active_id else ""
-        keyboard.append([
-            InlineKeyboardButton(f"{marker}{name}", callback_data=f"topic_select_{tid}_{name}"),
-            InlineKeyboardButton("🗑", callback_data=f"topic_delete_{tid}")
-        ])
-    keyboard.append([InlineKeyboardButton("+ Создать тему", callback_data="topic_create")])
-    if active_id:
-        keyboard.append([InlineKeyboardButton("❌ Выйти из темы", callback_data="topic_exit")])
-
-    current = f"Сейчас: *{active_name}*" if active_name else "Сейчас: общий чат"
-    await update.message.reply_text(
-        f"📂 *Мои темы*\n{current}\n\nВыбери тему или создай новую:",
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-async def topics_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user_id = update.effective_user.id
-    data = query.data
-
-    if data == "topic_create":
-        await query.edit_message_text("Напиши название новой темы:")
-        context.user_data['waiting_topic_name'] = True
-        return
-
-    if data == "topic_exit":
-        clear_active_topic(context)
-        await query.edit_message_text("Вышел из темы. Теперь общий чат.")
-        return
-
-    if data.startswith("topic_select_"):
-        parts = data.split("_", 3)
-        tid = int(parts[2])
-        name = parts[3]
-        set_active_topic(context, tid, name)
-        await query.edit_message_text(f"✅ Тема: *{name}*\n\nПиши — отвечу в контексте этой темы.", parse_mode="Markdown")
-        return
-
-    if data.startswith("topic_delete_"):
-        tid = int(data.split("_")[2])
-        active_id, _ = get_active_topic(context)
-        if active_id == tid:
-            clear_active_topic(context)
-        delete_topic(tid, user_id)
-        topics = get_topics(user_id)
-        keyboard = []
-        for t_id, name in topics:
-            keyboard.append([
-                InlineKeyboardButton(name, callback_data=f"topic_select_{t_id}_{name}"),
-                InlineKeyboardButton("🗑", callback_data=f"topic_delete_{t_id}")
-            ])
-        keyboard.append([InlineKeyboardButton("+ Создать тему", callback_data="topic_create")])
-        await query.edit_message_text(
-            "🗑 Тема удалена.\n\nВыбери тему:",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-
-# ── /image conversation ────────────────────────────────────────────────────────
-
-async def cmd_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await check_access(update):
-        return ConversationHandler.END
-    context.user_data.pop("img_ref", None)
-    context.user_data.pop("prompt", None)
-    keyboard = [[InlineKeyboardButton("⏭ Пропустить", callback_data="img_skip_photo")]]
-    await update.message.reply_text(
-        "🎨 *Генерация изображения*\n\n"
-        "Шаг 1: Прикрепи фото как референс.\n"
-        "Или нажми Пропустить чтобы генерировать с нуля.",
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-    return IMG_PHOTO
-
-async def img_receive_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.photo:
-        photo = update.message.photo[-1]
-        file = await context.bot.get_file(photo.file_id)
-        file_bytes = await file.download_as_bytearray()
-        context.user_data["img_ref"] = base64.standard_b64encode(file_bytes).decode()
-        await update.message.reply_text("✅ Фото получил!\n\nШаг 2: Напиши промт — что именно сгенерировать?")
-        return IMG_PROMPT
-    await update.message.reply_text("Отправь фото или нажми Пропустить.")
-    return IMG_PHOTO
-
-async def img_skip_photo_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    await query.edit_message_text("Шаг 2: Напиши промт — что сгенерировать?")
-    return IMG_PROMPT
-
-async def img_receive_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message.text:
-        return IMG_PROMPT
-    context.user_data["prompt"] = update.message.text
-    keyboard = [[
-        InlineKeyboardButton("1:1 📷", callback_data="ratio_1:1"),
-        InlineKeyboardButton("16:9 🖥", callback_data="ratio_16:9"),
-        InlineKeyboardButton("9:16 📱", callback_data="ratio_9:16"),
-    ]]
-    await update.message.reply_text(
-        f"✅ Промт: _{update.message.text[:80]}_\n\nШаг 3: Выбери формат:",
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-    return IMG_SETTINGS
-
-async def img_settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if not query.data.startswith("ratio_"):
-        return
-    await query.answer()
-    user_id = update.effective_user.id
-    allowed, reason = can_generate_image(user_id)
-    if not allowed:
-        await query.edit_message_text(
-            "🔒 Генерация изображений доступна по подписке.\n"
-            f"Оформи за {STARS_PRICE} ⭐️/месяц — /subscribe"
-        )
-        return ConversationHandler.END
-    ratio = query.data.replace("ratio_", "")
-    free_notice = " (бесплатная попытка)" if reason == "free_image" else ""
-    await query.edit_message_text(f"⏳ Генерирую ({ratio}){free_notice}...")
-
-    prompt = context.user_data.get("prompt", "")
-    img_ref = context.user_data.get("img_ref")
-    try:
-        if img_ref:
-            payload = {
-                "prompt": prompt,
-                "image": f"data:image/jpeg;base64,{img_ref}",
-                "aspect_ratio": ratio,
-                "strength": 0.75,
-                "num_inference_steps": 28,
-                "guidance_scale": 3.5,
-            }
-            url = await wavespeed_request("wavespeed-ai/flux-dev", payload)
-        else:
-            payload = {
-                "prompt": prompt,
-                "aspect_ratio": ratio,
-                "num_inference_steps": 4,
-            }
-            url = await wavespeed_request("wavespeed-ai/flux-schnell", payload)
-        increment_image_count(user_id)
-        await query.message.reply_photo(photo=url, caption=f"✅ {prompt[:200]}")
-    except Exception as e:
-        logger.error(f"Image gen error: {e}")
-        await query.message.reply_text(f"Ошибка генерации: {e}")
-    return ConversationHandler.END
-
-
-# ── /video conversation ────────────────────────────────────────────────────────
-
-async def cmd_video_gen(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await check_access(update):
-        return ConversationHandler.END
-    context.user_data.clear()
-    await update.message.reply_text(
-        "🎬 *Генерация видео*\n\nОтправь фото — из него сделаем видео.",
-        parse_mode="Markdown"
-    )
-    return VID_PHOTO
-
-async def vid_receive_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message.photo:
-        await update.message.reply_text("Нужно фото. Отправь изображение.")
-        return VID_PHOTO
-    photo = update.message.photo[-1]
-    file = await context.bot.get_file(photo.file_id)
-    file_bytes = await file.download_as_bytearray()
-    context.user_data["vid_photo"] = base64.standard_b64encode(file_bytes).decode()
-    await update.message.reply_text(
-        "📸 Фото получил!\n\n"
-        "Напиши промт — что должно происходить в видео.\n"
-        "Или отправь /skip для автоматического движения."
-    )
-    return VID_PROMPT
-
-async def vid_receive_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.text and update.message.text.strip() == "/skip":
-        context.user_data["vid_prompt"] = "Smooth cinematic motion, high quality"
-    else:
-        context.user_data["vid_prompt"] = update.message.text or "Smooth cinematic motion"
-    keyboard = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("⏱ 5 сек", callback_data="vd_5_480p"),
-            InlineKeyboardButton("⏱ 10 сек", callback_data="vd_10_480p"),
-        ],
-        [
-            InlineKeyboardButton("📺 480p / 5 сек", callback_data="vd_5_480p"),
-            InlineKeyboardButton("📺 720p / 5 сек", callback_data="vd_5_720p"),
-        ],
-        [
-            InlineKeyboardButton("📺 480p / 10 сек", callback_data="vd_10_480p"),
-            InlineKeyboardButton("📺 720p / 10 сек", callback_data="vd_10_720p"),
-        ],
-    ])
-    await update.message.reply_text(
-        "⚙️ Выбери параметры видео:",
-        reply_markup=keyboard
-    )
-    return VID_SETTINGS
-
-async def vid_settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    # pattern: vd_{duration}_{resolution}
-    parts = query.data.split("_")  # ['vd', '5', '480p']
-    duration = int(parts[1])
-    resolution = parts[2]
-    context.user_data["vid_duration"] = duration
-    context.user_data["vid_resolution"] = resolution
-
-    # resolve endpoint by resolution
-    endpoint = "bytedance/seedance-2-0-mini-i2v-720p" if resolution == "720p" else "bytedance/seedance-2-0-mini-i2v-480p"
-
-    user_id = query.from_user.id
-    allowed, reason = can_generate_video(user_id)
-    if not allowed:
-        await query.edit_message_text(
-            "🔒 Генерация видео доступна только по подписке.\n"
-            f"Оформи за {STARS_PRICE} ⭐️/месяц — /subscribe"
-        )
-        return ConversationHandler.END
-
-    await query.edit_message_text(f"⏳ Генерирую видео {duration} сек / {resolution}, ~30-90 сек...")
-    photo_b64 = context.user_data.get("vid_photo", "")
-    prompt = context.user_data.get("vid_prompt", "Smooth cinematic motion")
-    try:
-        payload = {
-            "image": f"data:image/jpeg;base64,{photo_b64}",
-            "prompt": prompt,
-            "duration": duration,
-            "resolution": resolution,
-        }
-        url = await wavespeed_request(endpoint, payload)
-        await query.message.reply_video(video=url, caption=f"✅ {duration}с / {resolution}\n{prompt[:180]}")
-    except Exception as e:
-        logger.error(f"Video gen error: {e}")
-        await query.message.reply_text(f"Ошибка генерации видео: {e}")
-    return ConversationHandler.END
-
-async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data.clear()
-    await update.message.reply_text("Отменено.")
-    return ConversationHandler.END
-
-init_db()
-
-async def check_expiring_subscriptions(context: ContextTypes.DEFAULT_TYPE):
-    """Runs daily — notifies users 3 days before expiry and on expiry day."""
-    conn = sqlite3.connect('memory.db')
-    c = conn.cursor()
-    now = datetime.now(timezone.utc)
-
-    # Expiring in ~3 days
-    in_3_days = now + timedelta(days=3)
-    c.execute("""
-        SELECT user_id FROM users
-        WHERE status = 'active'
-        AND expires_at IS NOT NULL
-        AND datetime(expires_at) BETWEEN datetime(?) AND datetime(?)
-    """, (now.isoformat(), in_3_days.isoformat()))
-    expiring_soon = c.fetchall()
-
-    # Already expired (within last 24h)
-    yesterday = now - timedelta(days=1)
-    c.execute("""
-        SELECT user_id FROM users
-        WHERE status = 'active'
-        AND expires_at IS NOT NULL
-        AND datetime(expires_at) < datetime(?)
-        AND datetime(expires_at) > datetime(?)
-    """, (now.isoformat(), yesterday.isoformat()))
-    just_expired = c.fetchall()
-    conn.close()
-
-    for (user_id,) in expiring_soon:
-        if user_id in ADMIN_IDS:
-            continue
-        try:
-            await context.bot.send_message(
-                chat_id=user_id,
-                text=f"⏰ Подписка заканчивается через 3 дня.\n\n"
-                     f"Продли сейчас чтобы не прерываться — /subscribe"
-            )
-        except Exception as e:
-            logger.error(f"Notify error {user_id}: {e}")
-
-    for (user_id,) in just_expired:
-        if user_id in ADMIN_IDS:
-            continue
-        try:
-            await context.bot.send_message(
-                chat_id=user_id,
-                text=f"😔 Подписка закончилась.\n\n"
-                     f"Оформи снова — {STARS_PRICE} ⭐️/мес: /subscribe\n\n"
-                     f"Или оставь фидбек: @BX_Supp_bot"
-            )
-            # Update status to trial so check_access handles them correctly
-            conn2 = sqlite3.connect('memory.db')
-            c2 = conn2.cursor()
-            c2.execute("UPDATE users SET status='trial' WHERE user_id=?", (user_id,))
-            conn2.commit()
-            conn2.close()
-        except Exception as e:
-            logger.error(f"Expired notify error {user_id}: {e}")
-
 
 def init_topics(conn):
     c = conn.cursor()
@@ -745,15 +662,308 @@ def clear_active_topic(context):
     context.user_data.pop('active_topic_id', None)
     context.user_data.pop('active_topic_name', None)
 
+async def cmd_topics(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_access(update):
+        return
+    user_id = update.effective_user.id
+    lang = get_lang(user_id)
+    topics = get_topics(user_id)
+    active_id, active_name = get_active_topic(context)
 
-async def send_subscribe_invoice(update: Update):
-    """Отправить инвойс на оплату Stars"""
+    keyboard = []
+    for tid, name in topics:
+        marker = "✅ " if tid == active_id else ""
+        keyboard.append([
+            InlineKeyboardButton(f"{marker}{name}", callback_data=f"topic_select_{tid}_{name}"),
+            InlineKeyboardButton("🗑", callback_data=f"topic_delete_{tid}")
+        ])
+    keyboard.append([InlineKeyboardButton(t(lang, 'topics_create_btn'), callback_data="topic_create")])
+    if active_id:
+        keyboard.append([InlineKeyboardButton(t(lang, 'topics_exit_btn'), callback_data="topic_exit")])
+
+    current = t(lang, 'topics_current', name=active_name) if active_name else t(lang, 'topics_general')
+    await update.message.reply_text(
+        t(lang, 'topics_header', current=current),
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+async def topics_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    lang = get_lang(user_id)
+    data = query.data
+
+    if data == "topic_create":
+        await query.edit_message_text(t(lang, 'topics_type_name'))
+        context.user_data['waiting_topic_name'] = True
+        return
+
+    if data == "topic_exit":
+        clear_active_topic(context)
+        await query.edit_message_text(t(lang, 'topics_exited'))
+        return
+
+    if data.startswith("topic_select_"):
+        parts = data.split("_", 3)
+        tid = int(parts[2])
+        name = parts[3]
+        set_active_topic(context, tid, name)
+        await query.edit_message_text(t(lang, 'topics_selected', name=name), parse_mode="Markdown")
+        return
+
+    if data.startswith("topic_delete_"):
+        tid = int(data.split("_")[2])
+        active_id, _ = get_active_topic(context)
+        if active_id == tid:
+            clear_active_topic(context)
+        delete_topic(tid, user_id)
+        topics = get_topics(user_id)
+        keyboard = []
+        for t_id, name in topics:
+            keyboard.append([
+                InlineKeyboardButton(name, callback_data=f"topic_select_{t_id}_{name}"),
+                InlineKeyboardButton("🗑", callback_data=f"topic_delete_{t_id}")
+            ])
+        keyboard.append([InlineKeyboardButton(t(lang, 'topics_create_btn'), callback_data="topic_create")])
+        await query.edit_message_text(
+            t(lang, 'topics_deleted'),
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+# ── /image conversation ────────────────────────────────────────────────────────
+
+async def cmd_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_access(update):
+        return ConversationHandler.END
+    user_id = update.effective_user.id
+    lang = get_lang(user_id)
+    context.user_data.pop("img_ref", None)
+    context.user_data.pop("prompt", None)
+    keyboard = [[InlineKeyboardButton(t(lang, 'img_skip_btn'), callback_data="img_skip_photo")]]
+    await update.message.reply_text(
+        t(lang, 'img_start'),
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    return IMG_PHOTO
+
+async def img_receive_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    lang = get_lang(update.effective_user.id)
+    if update.message.photo:
+        photo = update.message.photo[-1]
+        file = await context.bot.get_file(photo.file_id)
+        file_bytes = await file.download_as_bytearray()
+        context.user_data["img_ref"] = base64.standard_b64encode(file_bytes).decode()
+        await update.message.reply_text(t(lang, 'img_got_photo'))
+        return IMG_PROMPT
+    await update.message.reply_text(t(lang, 'img_need_photo'))
+    return IMG_PHOTO
+
+async def img_skip_photo_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    lang = get_lang(query.from_user.id)
+    await query.edit_message_text(t(lang, 'img_skip_msg'))
+    return IMG_PROMPT
+
+async def img_receive_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message.text:
+        return IMG_PROMPT
+    lang = get_lang(update.effective_user.id)
+    context.user_data["prompt"] = update.message.text
+    keyboard = [[
+        InlineKeyboardButton("1:1 📷", callback_data="ratio_1:1"),
+        InlineKeyboardButton("16:9 🖥", callback_data="ratio_16:9"),
+        InlineKeyboardButton("9:16 📱", callback_data="ratio_9:16"),
+    ]]
+    await update.message.reply_text(
+        t(lang, 'img_choose_ratio', prompt=update.message.text[:80]),
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    return IMG_SETTINGS
+
+async def img_settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not query.data.startswith("ratio_"):
+        return
+    await query.answer()
+    user_id = update.effective_user.id
+    lang = get_lang(user_id)
+    allowed, reason = can_generate_image(user_id)
+    if not allowed:
+        await query.edit_message_text(t(lang, 'img_no_sub', price=STARS_PRICE))
+        return ConversationHandler.END
+    ratio = query.data.replace("ratio_", "")
+    notice = t(lang, 'img_free_notice') if reason == "free_image" else ""
+    await query.edit_message_text(t(lang, 'img_generating', ratio=ratio, notice=notice))
+
+    prompt = context.user_data.get("prompt", "")
+    img_ref = context.user_data.get("img_ref")
+    try:
+        if img_ref:
+            payload = {
+                "prompt": prompt,
+                "image": f"data:image/jpeg;base64,{img_ref}",
+                "aspect_ratio": ratio,
+                "strength": 0.75,
+                "num_inference_steps": 28,
+                "guidance_scale": 3.5,
+            }
+            url = await wavespeed_request("wavespeed-ai/flux-dev", payload)
+        else:
+            payload = {
+                "prompt": prompt,
+                "aspect_ratio": ratio,
+                "num_inference_steps": 4,
+            }
+            url = await wavespeed_request("wavespeed-ai/flux-schnell", payload)
+        increment_image_count(user_id)
+        await query.message.reply_photo(photo=url, caption=f"✅ {prompt[:200]}")
+    except Exception as e:
+        logger.error(f"Image gen error: {e}")
+        await query.message.reply_text(f"Error: {e}")
+    return ConversationHandler.END
+
+# ── /video conversation ────────────────────────────────────────────────────────
+
+async def cmd_video_gen(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_access(update):
+        return ConversationHandler.END
+    user_id = update.effective_user.id
+    lang = get_lang(user_id)
+    context.user_data.clear()
+    await update.message.reply_text(t(lang, 'vid_start'), parse_mode="Markdown")
+    return VID_PHOTO
+
+async def vid_receive_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    lang = get_lang(update.effective_user.id)
+    if not update.message.photo:
+        await update.message.reply_text(t(lang, 'vid_need_photo'))
+        return VID_PHOTO
+    photo = update.message.photo[-1]
+    file = await context.bot.get_file(photo.file_id)
+    file_bytes = await file.download_as_bytearray()
+    context.user_data["vid_photo"] = base64.standard_b64encode(file_bytes).decode()
+    await update.message.reply_text(t(lang, 'vid_got_photo'))
+    return VID_PROMPT
+
+async def vid_receive_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    lang = get_lang(update.effective_user.id)
+    if update.message.text and update.message.text.strip() == "/skip":
+        context.user_data["vid_prompt"] = "Smooth cinematic motion, high quality"
+    else:
+        context.user_data["vid_prompt"] = update.message.text or "Smooth cinematic motion"
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("⏱ 5s / 480p", callback_data="vd_5_480p"),
+            InlineKeyboardButton("⏱ 5s / 720p", callback_data="vd_5_720p"),
+        ],
+        [
+            InlineKeyboardButton("⏱ 10s / 480p", callback_data="vd_10_480p"),
+            InlineKeyboardButton("⏱ 10s / 720p", callback_data="vd_10_720p"),
+        ],
+    ])
+    await update.message.reply_text(t(lang, 'vid_settings'), reply_markup=keyboard)
+    return VID_SETTINGS
+
+async def vid_settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    lang = get_lang(user_id)
+    parts = query.data.split("_")
+    duration = int(parts[1])
+    resolution = parts[2]
+    context.user_data["vid_duration"] = duration
+    context.user_data["vid_resolution"] = resolution
+    endpoint = "bytedance/seedance-2-0-mini-i2v-720p" if resolution == "720p" else "bytedance/seedance-2-0-mini-i2v-480p"
+
+    allowed, reason = can_generate_video(user_id)
+    if not allowed:
+        await query.edit_message_text(t(lang, 'vid_no_sub', price=STARS_PRICE))
+        return ConversationHandler.END
+
+    await query.edit_message_text(t(lang, 'vid_generating', dur=duration, res=resolution))
+    photo_b64 = context.user_data.get("vid_photo", "")
+    prompt = context.user_data.get("vid_prompt", "Smooth cinematic motion")
+    try:
+        payload = {
+            "image": f"data:image/jpeg;base64,{photo_b64}",
+            "prompt": prompt,
+            "duration": duration,
+            "resolution": resolution,
+        }
+        url = await wavespeed_request(endpoint, payload)
+        await query.message.reply_video(video=url, caption=f"✅ {duration}s / {resolution}\n{prompt[:180]}")
+    except Exception as e:
+        logger.error(f"Video gen error: {e}")
+        await query.message.reply_text(f"Error: {e}")
+    return ConversationHandler.END
+
+async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    lang = get_lang(update.effective_user.id)
+    context.user_data.clear()
+    await update.message.reply_text(t(lang, 'cancelled'))
+    return ConversationHandler.END
+
+init_db()
+
+async def check_expiring_subscriptions(context: ContextTypes.DEFAULT_TYPE):
+    conn = sqlite3.connect('memory.db')
+    c = conn.cursor()
+    now = datetime.now(timezone.utc)
+    in_3_days = now + timedelta(days=3)
+    c.execute("""
+        SELECT user_id FROM users
+        WHERE status = 'active'
+        AND expires_at IS NOT NULL
+        AND datetime(expires_at) BETWEEN datetime(?) AND datetime(?)
+    """, (now.isoformat(), in_3_days.isoformat()))
+    expiring_soon = c.fetchall()
+    yesterday = now - timedelta(days=1)
+    c.execute("""
+        SELECT user_id FROM users
+        WHERE status = 'active'
+        AND expires_at IS NOT NULL
+        AND datetime(expires_at) < datetime(?)
+        AND datetime(expires_at) > datetime(?)
+    """, (now.isoformat(), yesterday.isoformat()))
+    just_expired = c.fetchall()
+    conn.close()
+
+    for (user_id,) in expiring_soon:
+        if user_id in ADMIN_IDS:
+            continue
+        lang = get_lang(user_id)
+        try:
+            await context.bot.send_message(chat_id=user_id, text=t(lang, 'notify_expiring'))
+        except Exception as e:
+            logger.error(f"Notify error {user_id}: {e}")
+
+    for (user_id,) in just_expired:
+        if user_id in ADMIN_IDS:
+            continue
+        lang = get_lang(user_id)
+        try:
+            await context.bot.send_message(chat_id=user_id, text=t(lang, 'notify_expired', price=STARS_PRICE))
+            conn2 = sqlite3.connect('memory.db')
+            c2 = conn2.cursor()
+            c2.execute("UPDATE users SET status='trial' WHERE user_id=?", (user_id,))
+            conn2.commit()
+            conn2.close()
+        except Exception as e:
+            logger.error(f"Expired notify error {user_id}: {e}")
+
+async def send_subscribe_invoice(update: Update, lang: str = 'ru'):
     await update.message.reply_invoice(
-        title="Подписка на 30 дней",
-        description="Полный доступ к AI-ассистенту на 30 дней",
+        title=t(lang, 'sub_title'),
+        description=t(lang, 'sub_desc'),
         payload="subscribe_30",
         currency="XTR",
-        prices=[LabeledPrice("30 дней доступа", STARS_PRICE)],
+        prices=[LabeledPrice(t(lang, 'sub_label'), STARS_PRICE)],
     )
 
 GIF_FILE_ID = None
@@ -763,31 +973,20 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global GIF_FILE_ID
     user_id = update.effective_user.id
     username = update.effective_user.username or ""
-    # Проверяем лимит до регистрации (если юзер уже есть — пропускаем)
     if user_id not in ADMIN_IDS:
         row = get_user_status(user_id)
         if not row and get_total_users() >= MAX_USERS:
-            await update.message.reply_text(
-                "Извини, набор закрыт — все места заняты 🙏\n\n"
-                "Напишу когда откроется следующий поток."
-            )
+            lang = 'ru'
+            await update.message.reply_text(t(lang, 'start_closed'))
             return
     register_user(user_id, username)
+    lang = get_lang(user_id)
     if user_id in ADMIN_IDS:
-        caption = "Привет! Я твой личный ассистент. Готов к работе 🚀"
+        caption = t(lang, 'start_admin')
     else:
-        caption = (
-            "Привет! Я персональный AI-ассистент.\n\n"
-            f"У тебя есть {TRIAL_DAYS} дней бесплатного доступа ко всем функциям.\n\n"
-        "Просто пиши — отвечу, расшифрую голосовые и видео, разберу фото и PDF, найду в интернете.\n"
-        "Для генерации используй команды:\n"
-        "/image — сгенерировать изображение\n"
-        "/video — создать видео из фото\n"
-    
-            f"После пробного периода — подписка {STARS_PRICE} ⭐️ в месяц."
-        )
+        caption = t(lang, 'start_user', days=TRIAL_DAYS, price=STARS_PRICE)
     try:
-        reply_markup = MAIN_KEYBOARD
+        reply_markup = make_keyboard(lang)
         if GIF_FILE_ID:
             msg = await update.message.reply_animation(animation=GIF_FILE_ID, caption=caption, reply_markup=reply_markup)
         else:
@@ -798,100 +997,100 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 logger.info(f"GIF file_id cached: {GIF_FILE_ID}")
     except Exception as e:
         logger.error(f"GIF send error: {e}")
-        await update.message.reply_text(caption, reply_markup=reply_markup)
+        await update.message.reply_text(caption, reply_markup=make_keyboard(lang))
 
 async def cmd_subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    lang = get_lang(user_id)
     if user_id in ADMIN_IDS:
-        await update.message.reply_text("У тебя безлимитный доступ 😎")
+        await update.message.reply_text(t(lang, 'sub_admin'))
         return
     register_user(user_id, update.effective_user.username or "")
-    await send_subscribe_invoice(update)
+    await send_subscribe_invoice(update, lang)
 
 async def pre_checkout(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.pre_checkout_query.answer(ok=True)
 
 async def successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    lang = get_lang(user_id)
     expires = activate_subscription(user_id)
     exp_str = expires.strftime("%d.%m.%Y")
-    await update.message.reply_text(
-        f"✅ Оплата прошла! Доступ открыт до {exp_str}.\n\n"
-        f"Спасибо! Пиши мне в любое время 🚀"
-    )
+    await update.message.reply_text(t(lang, 'payment_ok', date=exp_str))
 
 async def check_access(update: Update) -> bool:
     user_id = update.effective_user.id
+    lang = get_lang(user_id)
     allowed, reason = is_allowed(user_id)
     if allowed:
         return True
     if reason == "not_registered":
-        await update.message.reply_text("Напиши /start чтобы начать.")
+        await update.message.reply_text(t(lang, 'access_not_registered'))
     elif reason == "expired":
-        await update.message.reply_text(
-            f"Твой пробный период закончился 😔\n\n"
-            f"Оформи подписку — {STARS_PRICE} ⭐️ в месяц:\n\n"
-            "Или оставь фидбек: @BX_Supp_bot"
-        )
-        await send_subscribe_invoice(update)
+        await update.message.reply_text(t(lang, 'access_expired', price=STARS_PRICE))
+        await send_subscribe_invoice(update, lang)
     elif reason == "blocked":
-        await update.message.reply_text("Доступ ограничен.")
+        await update.message.reply_text(t(lang, 'access_blocked'))
     return False
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_access(update):
         return
     user_id = update.effective_user.id
+    lang = get_lang(user_id)
     user_text = update.message.text
-    # Handle keyboard buttons
+
     if context.user_data.get('waiting_topic_name'):
         del context.user_data['waiting_topic_name']
         tid = create_topic(user_id, user_text)
         set_active_topic(context, tid, user_text)
-        await update.message.reply_text(f"✅ Тема *{user_text}* создана и выбрана!", parse_mode="Markdown")
+        await update.message.reply_text(t(lang, 'topics_created', name=user_text), parse_mode="Markdown")
         return
-    if user_text == "📂 Темы":
+
+    # Keyboard buttons — check both languages
+    btn_image_vals = {STRINGS['ru']['btn_image'], STRINGS['en']['btn_image']}
+    btn_video_vals = {STRINGS['ru']['btn_video'], STRINGS['en']['btn_video']}
+    btn_topics_vals = {STRINGS['ru']['btn_topics'], STRINGS['en']['btn_topics']}
+    btn_sub_vals = {STRINGS['ru']['btn_sub'], STRINGS['en']['btn_sub']}
+    btn_help_vals = {STRINGS['ru']['btn_help'], STRINGS['en']['btn_help']}
+
+    if user_text in btn_topics_vals:
         await cmd_topics(update, context)
         return
-    if user_text == "🎨 Генерация фото":
+    if user_text in btn_image_vals:
         await cmd_image(update, context)
         return
-    if user_text == "🎬 Генерация видео":
+    if user_text in btn_video_vals:
         await cmd_video_gen(update, context)
         return
-    if user_text == "💳 Подписка":
+    if user_text in btn_sub_vals:
         await cmd_subscribe(update, context)
         return
-    if user_text == "❓ Помощь":
-        await update.message.reply_text(
-            "Просто напиши мне что угодно — отвечу.\n\n"
-            "Также умею:\n"
-            "🎤 Голосовые и кружочки — расшифрую\n"
-            "📷 Фото и PDF — проанализирую\n"
-            "🌐 Веб-поиск — найду актуальное\n"
-            "🎨 /image — генерация изображения\n"
-            "🎬 /video — генерация видео из фото\n"
-            "💳 /subscribe — подписка"
-        )
+    if user_text in btn_help_vals:
+        await update.message.reply_text(t(lang, 'help_text'))
         return
+
     try:
-        if any(word in user_text.lower() for word in ['запомни что', 'запомни:', 'всегда', 'никогда не']):
+        remember_kw = STRINGS[lang].get('remember_keywords', STRINGS['ru']['remember_keywords'])
+        if any(word in user_text.lower() for word in remember_kw):
             prefs = get_prefs(user_id)
             new_prefs = prefs + '\n' + user_text if prefs else user_text
             save_prefs(user_id, new_prefs)
-            await update.message.reply_text("Запомнил!")
+            await update.message.reply_text(t(lang, 'remembered'))
             return
+
         search_context = ""
-        if needs_search(user_text):
-            await update.message.reply_text("Ищу в интернете...")
+        if needs_search(user_text, lang):
+            await update.message.reply_text(t(lang, 'searching'))
             search_context = web_search(user_text)
+
         active_id, active_name = get_active_topic(context)
         if active_id:
             save_topic_message(user_id, active_id, "user", user_text)
             history = get_topic_history(user_id, active_id)
             if search_context:
-                history[-1]["content"] += f"\n\n[Результаты поиска]:\n{search_context}"
-            topic_system = get_system(user_id) + f"\n\nСейчас активна тема: {active_name}. Веди диалог в этом контексте."
+                history[-1]["content"] += f"\n\n[Search results]:\n{search_context}"
+            topic_system = get_system(user_id) + f"\n\nActive topic: {active_name}."
             response = client.messages.create(
                 model="claude-sonnet-4-6", max_tokens=1000,
                 system=topic_system, messages=history)
@@ -903,7 +1102,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update_summary(user_id)
             history = get_history(user_id)
             if search_context:
-                history[-1]["content"] += f"\n\n[Результаты поиска]:\n{search_context}"
+                history[-1]["content"] += f"\n\n[Search results]:\n{search_context}"
             response = client.messages.create(
                 model="claude-sonnet-4-6", max_tokens=1000,
                 system=get_system(user_id), messages=history)
@@ -912,14 +1111,15 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(reply)
     except Exception as e:
         logger.error(f"Text error: {e}")
-        await update.message.reply_text("Ошибка, попробуй ещё раз.")
+        await update.message.reply_text(t(lang, 'error_retry'))
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_access(update):
         return
     user_id = update.effective_user.id
+    lang = get_lang(user_id)
     try:
-        await update.message.reply_text("Голосовое получил, транскрибирую...")
+        await update.message.reply_text(t(lang, 'voice_received'))
         file = await context.bot.get_file(update.message.voice.file_id)
         path = f"/tmp/voice_{user_id}.ogg"
         await file.download_to_drive(path)
@@ -927,9 +1127,9 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = " ".join([s.text for s in segments])
         os.remove(path)
         if not text.strip():
-            await update.message.reply_text("Не смог распознать.")
+            await update.message.reply_text(t(lang, 'voice_no_speech'))
             return
-        await update.message.reply_text(f"Распознал: {text}")
+        await update.message.reply_text(t(lang, 'voice_recognized', text=text))
         save_message(user_id, "user", text)
         response = client.messages.create(model="claude-sonnet-4-6", max_tokens=1000,
                                           system=get_system(user_id), messages=get_history(user_id))
@@ -938,10 +1138,9 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(reply)
     except Exception as e:
         logger.error(f"Voice error: {e}")
-        await update.message.reply_text("Ошибка с голосовым.")
+        await update.message.reply_text(t(lang, 'voice_error'))
 
 async def extract_video_frames(video_path: str, user_id: int, max_frames: int = 4) -> list:
-    """Extract frames from video, return list of base64 strings."""
     frames = []
     try:
         result = subprocess.run(
@@ -952,10 +1151,10 @@ async def extract_video_frames(video_path: str, user_id: int, max_frames: int = 
         duration = float(result.stdout.strip() or "5")
         interval = max(1, duration / max_frames)
         for i in range(min(max_frames, int(duration))):
-            t = i * interval
+            t_sec = i * interval
             frame_path = f"/tmp/frame_{user_id}_{i}.jpg"
             subprocess.run(
-                ["ffmpeg", "-y", "-ss", str(t), "-i", video_path,
+                ["ffmpeg", "-y", "-ss", str(t_sec), "-i", video_path,
                  "-vframes", "1", "-q:v", "3", "-vf", "scale=640:-1", frame_path],
                 capture_output=True
             )
@@ -974,22 +1173,22 @@ async def handle_media_video(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not await check_access(update):
         return
     user_id = update.effective_user.id
+    lang = get_lang(user_id)
     is_circle = update.message.video_note is not None
     try:
         if is_circle:
-            await update.message.reply_text("Кружочек получил, анализирую...")
+            await update.message.reply_text(t(lang, 'video_circle_received'))
         else:
-            await update.message.reply_text("Видео получил, извлекаю звук...")
+            await update.message.reply_text(t(lang, 'video_received'))
         video = update.message.video_note or update.message.video
         if not video:
-            await update.message.reply_text("Не понял тип видео.")
+            await update.message.reply_text(t(lang, 'video_unknown'))
             return
         file = await context.bot.get_file(video.file_id)
         video_path = f"/tmp/media_{user_id}.mp4"
         audio_path = f"/tmp/media_{user_id}.wav"
         await file.download_to_drive(video_path)
 
-        # Extract audio
         audio_result = subprocess.run(
             ["ffmpeg", "-y", "-i", video_path, "-vn", "-ar", "16000", "-ac", "1", audio_path],
             capture_output=True, text=True)
@@ -999,7 +1198,6 @@ async def handle_media_video(update: Update, context: ContextTypes.DEFAULT_TYPE)
             speech_text = " ".join([s.text for s in segments]).strip()
             os.remove(audio_path)
 
-        # For video notes (circles) — also extract frames for visual analysis
         visual_content = []
         if is_circle:
             frames = await extract_video_frames(video_path, user_id, max_frames=3)
@@ -1010,31 +1208,25 @@ async def handle_media_video(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 })
 
         os.remove(video_path)
-
         caption = update.message.caption or ""
 
         if is_circle and visual_content:
-            # Full analysis: visual + speech
             parts = visual_content.copy()
             prompt = ""
             if speech_text:
-                prompt += f"Речь в кружочке: {speech_text}\n\n"
-            prompt += caption or "Опиши что происходит в этом кружочке: кто там, что делает, что говорит, какая обстановка."
+                prompt += f"Speech in video: {speech_text}\n\n"
+            prompt += caption or t(lang, 'circle_prompt')
             parts.append({"type": "text", "text": prompt})
-
             messages = get_history(user_id) + [{"role": "user", "content": parts}]
             response = client.messages.create(
                 model="claude-sonnet-4-6", max_tokens=1000,
                 system=get_system(user_id), messages=messages)
             reply = response.content[0].text
-            if speech_text:
-                save_message(user_id, "user", f"[кружочек] {speech_text}")
-            else:
-                save_message(user_id, "user", "[кружочек без речи]")
+            save_message(user_id, "user", f"[video note] {speech_text or 'no speech'}")
             save_message(user_id, "assistant", reply)
             await update.message.reply_text(reply)
         elif speech_text:
-            await update.message.reply_text(f"Распознал: {speech_text}")
+            await update.message.reply_text(t(lang, 'voice_recognized', text=speech_text))
             save_message(user_id, "user", speech_text)
             response = client.messages.create(model="claude-sonnet-4-6", max_tokens=1000,
                                               system=get_system(user_id), messages=get_history(user_id))
@@ -1042,62 +1234,58 @@ async def handle_media_video(update: Update, context: ContextTypes.DEFAULT_TYPE)
             save_message(user_id, "assistant", reply)
             await update.message.reply_text(reply)
         else:
-            await update.message.reply_text("Не смог распознать речь в видео.")
+            await update.message.reply_text(t(lang, 'video_no_speech'))
     except Exception as e:
         logger.error(f"Media video error: {e}", exc_info=True)
-        await update.message.reply_text("Ошибка с видео.")
+        await update.message.reply_text(t(lang, 'video_error'))
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    lang = get_lang(user_id)
     try:
-        await update.message.reply_text("Фото получил, анализирую...")
+        await update.message.reply_text(t(lang, 'photo_received'))
         photo = update.message.photo[-1]
         file = await context.bot.get_file(photo.file_id)
         file_bytes = await file.download_as_bytearray()
         image_data = base64.standard_b64encode(file_bytes).decode('utf-8')
-        caption = update.message.caption or "Опиши подробно что на этом фото. Только анализ изображения, без генерации."
+        caption = update.message.caption or t(lang, 'photo_caption')
         messages = get_history(user_id) + [{"role": "user", "content": [
             {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": image_data}},
             {"type": "text", "text": caption}]}]
         response = client.messages.create(model="claude-sonnet-4-6", max_tokens=1500,
                                           system=get_system(user_id), messages=messages)
         reply = response.content[0].text
-        save_message(user_id, "user", f"[фото] {caption}")
+        save_message(user_id, "user", f"[photo] {caption}")
         save_message(user_id, "assistant", reply)
         await update.message.reply_text(reply)
     except Exception as e:
         logger.error(f"Photo error: {e}")
-        await update.message.reply_text("Ошибка с фото.")
+        await update.message.reply_text(t(lang, 'photo_error'))
 
 GEN_KEYWORDS = [
     'сгенерируй', 'сгенери', 'создай', 'нарисуй', 'generate', 'создайте',
-    'сделай картинку', 'сделай изображение', 'сделай фото', '360', 'арт',
-    'в стиле', 'превратись', 'превrati', 'render', 'draw', 'image of',
+    'сделай картинку', 'сделай изображение', 'сделай фото', 'арт',
+    'в стиле', 'render', 'draw', 'image of',
     'создай персонажа', 'сделай персонажа', 'аниме', 'cartoon', 'мультяш'
 ]
 
 async def handle_smart_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_access(update):
         return
+    user_id = update.effective_user.id
+    lang = get_lang(user_id)
     caption = (update.message.caption or "").lower()
-    # Check if caption has generation intent
     if any(kw in caption for kw in GEN_KEYWORDS):
-        user_id = update.effective_user.id
         allowed, reason = can_generate_image(user_id)
         if not allowed:
-            await update.message.reply_text(
-                "🔒 Генерация по подписке.\n"
-                f"Оформи за {STARS_PRICE} ⭐️/мес — /subscribe"
-            )
+            await update.message.reply_text(t(lang, 'gen_no_sub', price=STARS_PRICE))
             return
-        # Use photo as reference, caption as prompt
-        await update.message.reply_text("🎨 Понял, генерирую по твоей фотке...")
+        await update.message.reply_text(t(lang, 'gen_photo_confirm'))
         photo = update.message.photo[-1]
         file = await context.bot.get_file(photo.file_id)
         file_bytes = await file.download_as_bytearray()
         img_ref = base64.standard_b64encode(file_bytes).decode()
         prompt = update.message.caption or "Create a stylized image based on this photo"
-        # Ask for aspect ratio
         keyboard = [[
             InlineKeyboardButton("1:1 📷", callback_data="ratio_1:1"),
             InlineKeyboardButton("16:9 🖥", callback_data="ratio_16:9"),
@@ -1105,7 +1293,7 @@ async def handle_smart_photo(update: Update, context: ContextTypes.DEFAULT_TYPE)
         ]]
         context.user_data["prompt"] = prompt
         context.user_data["img_ref"] = img_ref
-        await update.message.reply_text("Выбери формат:", reply_markup=InlineKeyboardMarkup(keyboard))
+        await update.message.reply_text(t(lang, 'gen_choose_ratio'), reply_markup=InlineKeyboardMarkup(keyboard))
         return
     await handle_photo(update, context)
 
@@ -1113,43 +1301,44 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_access(update):
         return
     user_id = update.effective_user.id
+    lang = get_lang(user_id)
     try:
         doc = update.message.document
         caption = update.message.caption or ""
         if doc.mime_type == 'application/pdf':
-            await update.message.reply_text("PDF получил, читаю...")
+            await update.message.reply_text(t(lang, 'doc_pdf_received'))
             file = await context.bot.get_file(doc.file_id)
             file_bytes = await file.download_as_bytearray()
             pdf_data = base64.standard_b64encode(file_bytes).decode('utf-8')
             messages = [{"role": "user", "content": [
                 {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": pdf_data}},
-                {"type": "text", "text": caption or "Проанализируй этот документ подробно."}]}]
+                {"type": "text", "text": caption or t(lang, 'doc_pdf_prompt')}]}]
         elif doc.mime_type in ('image/gif', 'video/mp4') or (doc.file_name and doc.file_name.endswith('.gif')):
             if user_id in ADMIN_IDS:
                 await update.message.reply_text(f"file_id: {doc.file_id}")
             else:
-                await update.message.reply_text("GIF получил!")
+                await update.message.reply_text("GIF!")
             return
         elif doc.mime_type and doc.mime_type.startswith('image/'):
-            await update.message.reply_text("Изображение получил, анализирую...")
+            await update.message.reply_text(t(lang, 'doc_img_received'))
             file = await context.bot.get_file(doc.file_id)
             file_bytes = await file.download_as_bytearray()
             image_data = base64.standard_b64encode(file_bytes).decode('utf-8')
             messages = get_history(user_id) + [{"role": "user", "content": [
                 {"type": "image", "source": {"type": "base64", "media_type": doc.mime_type, "data": image_data}},
-                {"type": "text", "text": caption or "Что на этом изображении?"}]}]
+                {"type": "text", "text": caption or t(lang, 'doc_img_question')}]}]
         else:
-            await update.message.reply_text("Пока умею читать только PDF и изображения.")
+            await update.message.reply_text(t(lang, 'doc_unsupported'))
             return
         response = client.messages.create(model="claude-sonnet-4-6", max_tokens=1500,
                                           system=get_system(user_id), messages=messages)
         reply = response.content[0].text
-        save_message(user_id, "user", f"[файл] {caption}")
+        save_message(user_id, "user", f"[file] {caption}")
         save_message(user_id, "assistant", reply)
         await update.message.reply_text(reply)
     except Exception as e:
         logger.error(f"Document error: {e}")
-        await update.message.reply_text("Ошибка с файлом.")
+        await update.message.reply_text(t(lang, 'doc_error'))
 
 async def handle_animation(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -1162,22 +1351,18 @@ async def cmd_getid(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     msg = update.message.reply_to_message
     if not msg:
-        await update.message.reply_text("Ответь на сообщение с медиа командой /getid")
+        await update.message.reply_text("Reply to a media message with /getid")
         return
     for field in ['animation', 'video', 'document', 'photo', 'voice']:
         obj = getattr(msg, field, None)
         if obj:
-            if field == 'photo':
-                fid = obj[-1].file_id
-            else:
-                fid = obj.file_id
+            fid = obj[-1].file_id if field == 'photo' else obj.file_id
             await update.message.reply_text(f"{field}_file_id:\n`{fid}`", parse_mode='Markdown')
             return
-    await update.message.reply_text("Медиа не найдено")
+    await update.message.reply_text("No media found")
 
 app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
-# Conversations first (priority)
 img_conv = ConversationHandler(
     entry_points=[CommandHandler("image", cmd_image)],
     states={
@@ -1206,7 +1391,9 @@ app.add_handler(vid_conv)
 
 app.add_handler(CommandHandler("topics", cmd_topics))
 app.add_handler(CallbackQueryHandler(topics_callback, pattern="^topic_"))
+app.add_handler(CallbackQueryHandler(lang_callback, pattern="^setlang_"))
 app.add_handler(CommandHandler("start", cmd_start))
+app.add_handler(CommandHandler("language", cmd_language))
 app.add_handler(CommandHandler("subscribe", cmd_subscribe))
 app.add_handler(CommandHandler("getid", cmd_getid))
 app.add_handler(PreCheckoutQueryHandler(pre_checkout))
@@ -1217,8 +1404,7 @@ app.add_handler(MessageHandler(filters.ANIMATION, handle_animation))
 app.add_handler(MessageHandler((filters.VIDEO & ~filters.ANIMATION) | filters.VIDEO_NOTE, handle_media_video))
 app.add_handler(MessageHandler(filters.PHOTO, handle_smart_photo))
 app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
-print("Бот запущен v8 — уведомления подписки")
-# Schedule daily subscription check at 10:00 UTC
+print("Bot started v9 — i18n ru/en")
 import datetime as dt
 app.job_queue.run_daily(
     check_expiring_subscriptions,
