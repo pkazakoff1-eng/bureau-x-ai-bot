@@ -1,0 +1,12 @@
+.env
+memory.db
+__pycache__/
+*.pyc
+venv/
+*.mp4
+*.gif
+*.wav
+*.ogg
+*.mp3
+/tmp/
+backups/
