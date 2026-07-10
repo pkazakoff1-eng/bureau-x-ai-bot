@@ -1,1841 +1,1322 @@
-from dotenv import load_dotenv
-load_dotenv()
-
 import anthropic
+import requests
+import time
 import sqlite3
 import base64
 import os
-import subprocess
-import logging
-from datetime import datetime, timezone, timedelta
-import asyncio
-import httpx
+import io
 import uuid
-from telegram import Update, LabeledPrice, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
-from telegram.constants import ChatAction
-from telegram.ext import (ApplicationBuilder, MessageHandler, CommandHandler,
-                          PreCheckoutQueryHandler, ConversationHandler,
-                          CallbackQueryHandler, filters, ContextTypes)
+import logging
+from datetime import date, datetime, timedelta
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardRemove
+from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, CallbackQueryHandler, filters, ContextTypes
 from faster_whisper import WhisperModel
 from tavily import TavilyClient
+from dotenv import load_dotenv
+
+load_dotenv()
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
-ANTHROPIC_KEY = os.getenv("ANTHROPIC_KEY", "")
-TAVILY_KEY = os.getenv("TAVILY_KEY", "")
+TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
+ANTHROPIC_KEY  = os.environ["ANTHROPIC_KEY"]
+TAVILY_KEY     = os.environ["TAVILY_KEY"]
+WAVESPEED_KEY  = os.environ["WAVESPEED_KEY"]
 
-ADMIN_IDS = {285198612, 587290278}
-WAVESPEED_KEY = os.getenv("WAVESPEED_API_KEY", "")
+OWNER_ID = 285198612
+VIP_ID   = 587290278
 
+TIER_OWNER      = "owner"
+TIER_VIP        = "vip"
+TIER_SUBSCRIBER = "subscriber"
+TIER_BETA       = "beta"
+TIER_BLOCKED    = "blocked"
 
-# ── Rate limiting ────────────────────────────────────────────────────────────
-from collections import defaultdict
-import time as _time
-
-_rate_data = defaultdict(list)  # user_id -> [timestamps]
-RATE_LIMIT = 10   # messages
-RATE_WINDOW = 60  # seconds
-
-def is_rate_limited(user_id: int) -> bool:
-    if user_id in ADMIN_IDS:
-        return False
-    now = _time.time()
-    window = _rate_data[user_id]
-    # Drop old entries
-    _rate_data[user_id] = [t for t in window if now - t < RATE_WINDOW]
-    if len(_rate_data[user_id]) >= RATE_LIMIT:
-        return True
-    _rate_data[user_id].append(now)
-    return False
-# ── Strings / i18n ────────────────────────────────────────────────────────────
-STRINGS = {
-    'ru': {
-        'btn_image': '🎨 Генерация фото',
-        'btn_video': '🎬 Генерация видео',
-        'btn_topics': '📂 Темы',
-        'btn_sub': '💳 Подписка',
-        'btn_help': '❓ Помощь',
-        'btn_lang': '🌐 Язык',
-        'kb_placeholder': 'Напиши сообщение или выбери действие...',
-        'start_admin': 'Привет! Я твой личный ассистент. Готов к работе 🚀',
-        'start_user': (
-            'Привет! Я персональный AI-ассистент.\n\n'
-            'У тебя есть {days} дней бесплатного доступа ко всем функциям.\n\n'
-            'Просто пиши — отвечу, расшифрую голосовые и видео, разберу фото и PDF, найду в интернете.\n'
-            'Для генерации используй команды:\n'
-            '/image — сгенерировать изображение\n'
-            '/video — создать видео из фото\n\n'
-            'После пробного периода — подписка {price} ⭐️ в месяц.'
-        ),
-        'start_closed': 'Извини, набор закрыт — все места заняты 🙏\n\nНапишу когда откроется следующий поток.',
-        'help_text': (
-            'Просто напиши мне что угодно — отвечу.\n\n'
-            'Также умею:\n'
-            '🎤 Голосовые и кружочки — расшифрую\n'
-            '📷 Фото и PDF — проанализирую\n'
-            '🌐 Веб-поиск — найду актуальное\n'
-            '🎨 /image — генерация изображения\n'
-            '🎬 /video — генерация видео из фото\n'
-            '💳 /subscribe — подписка'
-        ),
-        'access_not_registered': 'Напиши /start чтобы начать.',
-        'access_expired': 'Твой пробный период закончился 😔\n\nОформи подписку — {price} ⭐️ в месяц:\n\nИли оставь фидбек: @BX_Supp_bot',
-        'access_blocked': 'Доступ ограничен.',
-        'sub_admin': 'У тебя безлимитный доступ 😎',
-        'sub_title': 'Подписка на 30 дней',
-        'sub_desc': 'Полный доступ к AI-ассистенту на 30 дней',
-        'sub_label': '30 дней доступа',
-        'payment_ok': '✅ Оплата прошла! Доступ открыт до {date}.\n\nСпасибо! Пиши мне в любое время 🚀',
-        'img_start': '🎨 *Генерация изображения*\n\nШаг 1: Прикрепи фото как референс.\nИли нажми Пропустить, чтобы генерировать с нуля.',
-        'img_skip_btn': '⏭ Пропустить',
-        'img_got_photo': '✅ Фото получил!\n\nШаг 2: Напиши промт — что именно сгенерировать?',
-        'img_need_photo': 'Отправь фото или нажми Пропустить.',
-        'img_skip_msg': 'Шаг 2: Напиши промт — что сгенерировать?',
-        'img_choose_ratio': '✅ Промт: _{prompt}_\n\nШаг 3: Выбери формат:',
-        'img_no_sub': '🔒 Генерация изображений доступна по подписке.\nОформи за {price} ⭐️/месяц — /subscribe',
-        'img_generating': '⏳ Генерирую ({ratio}){notice}...',
-        'img_free_notice': ' (бесплатная попытка)',
-        'vid_start': '🎬 *Генерация видео*\n\nОтправь фото — из него сделаем видео.',
-        'vid_need_photo': 'Нужно фото. Отправь изображение.',
-        'vid_got_photo': '📸 Фото получил!\n\nНапиши промт — что должно происходить в видео.\nИли отправь /skip для автоматического движения.',
-        'vid_settings': '⚙️ Выбери параметры видео:',
-        'vid_no_sub': '🔒 Генерация видео доступна только по подписке.\nОформи за {price} ⭐️/месяц — /subscribe',
-        'vid_generating': '⏳ Генерирую видео {dur} сек / {res}, ~30-90 сек...',
-        'cancelled': 'Отменено.',
-        'topics_header': '📂 *Мои темы*\n{current}\n\nВыбери тему или создай новую:',
-        'topics_current': 'Сейчас: *{name}*',
-        'topics_general': 'Сейчас: общий чат',
-        'topics_type_name': 'Напиши название новой темы:',
-        'topics_exited': 'Вышел из темы. Теперь общий чат.',
-        'topics_create_btn': '+ Создать тему',
-        'topics_exit_btn': '❌ Выйти из темы',
-        'topics_selected': '✅ Тема: *{name}*\n\nПиши — отвечу в контексте этой темы.',
-        'topics_deleted': '🗑 Тема удалена.\n\nВыбери тему:',
-        'topics_created': '✅ Тема *{name}* создана и выбрана!',
-        'topics_ask_goal': '✅ Тема: *{name}*\n\nЧто хочешь сделать в этой теме? Напиши цель или вопрос — сразу отвечу по делу.\nИли просто пиши — войду в контекст темы.',
-        'topics_goal_set': '[{name}] Понял, работаем. Пиши.',
-        'topics_save_as': '💡 Сохранить этот разговор как тему?',
-        'topics_save_btn': '💾 Сохранить как тему',
-        'topics_saved': '✅ Тема *{name}* создана!',
-        'topics_detect_prompt': 'Определи одним коротким словом или фразой (максимум 3 слова) тему этого разговора на основе последних сообщений. Только тема, без пояснений.',
-        'voice_received': 'Голосовое получил, транскрибирую...',
-        'voice_no_speech': 'Не смог распознать.',
-        'voice_recognized': 'Распознал: {text}',
-        'voice_error': 'Ошибка с голосовым.',
-        'photo_received': 'Фото получил, анализирую...',
-        'photo_caption': 'Опиши подробно что на этом фото. Только анализ изображения, без генерации.',
-        'photo_error': 'Ошибка с фото.',
-        'gen_photo_confirm': '🎨 Понял, генерирую по твоей фотке...',
-        'gen_choose_ratio': 'Выбери формат:',
-        'gen_no_sub': '🔒 Генерация по подписке.\nОформи за {price} ⭐️/мес — /subscribe',
-        'video_circle_received': 'Кружочек получил, анализирую...',
-        'video_received': 'Видео получил, извлекаю звук...',
-        'video_unknown': 'Не понял тип видео.',
-        'video_no_speech': 'Не смог распознать речь в видео.',
-        'video_error': 'Ошибка с видео.',
-        'circle_prompt': 'Опиши что происходит в этом кружочке: кто там, что делает, что говорит, какая обстановка.',
-        'doc_pdf_received': 'PDF получил, читаю...',
-        'doc_pdf_prompt': 'Проанализируй этот документ подробно.',
-        'doc_img_received': 'Изображение получил, анализирую...',
-        'doc_img_question': 'Что на этом изображении?',
-        'doc_unsupported': 'Пока умею читать только PDF и изображения.',
-        'doc_error': 'Ошибка с файлом.',
-        'remembered': 'Запомнил!',
-        'searching': 'Ищу в интернете...',
-        'error_retry': 'Ошибка, попробуй ещё раз.',
-        'lang_choose': '🌐 Выбери язык / Choose language:',
-        'lang_set_ru': '✅ Язык установлен: Русский 🇷🇺',
-        'lang_set_en': '✅ Language set: English 🇬🇧',
-        'remind_set': 'Напоминание установлено на {dt} 🔔',
-        'remind_text': '🔔 Напоминание: {text}',
-        'remind_no_time': 'Не понял время. Напиши например: напомни завтра в 10 позвонить Саше',
-        'remind_ics': '📅 Добавить в календарь:',
-        'notify_expiring': '⏰ Подписка заканчивается через 3 дня.\n\nПродли сейчас чтобы не прерываться — /subscribe',
-        'notify_expired': '😔 Подписка закончилась.\n\nОформи снова — {price} ⭐️/мес: /subscribe\n\nИли оставь фидбек: @BX_Supp_bot',
-        'search_keywords': ['найди', 'поищи', 'что сейчас', 'актуально', 'последние', 'новости',
-                            'цена', 'стоимость', 'требования', 'правила', 'как сейчас', 'узнай', 'проверь'],
-        'remember_keywords': ['запомни что', 'запомни:', 'всегда', 'никогда не'],
-    },
-    'en': {
-        'btn_image': '🎨 Generate image',
-        'btn_video': '🎬 Generate video',
-        'btn_topics': '📂 Topics',
-        'btn_sub': '💳 Subscription',
-        'btn_help': '❓ Help',
-        'btn_lang': '🌐 Language',
-        'kb_placeholder': 'Type a message or choose an action...',
-        'start_admin': 'Hi! I\'m your personal assistant. Ready to go 🚀',
-        'start_user': (
-            'Hi! I\'m your personal AI assistant.\n\n'
-            'You have {days} days of free access to all features.\n\n'
-            'Just write — I\'ll reply, transcribe voice and video, analyze photos and PDFs, search the web.\n'
-            'For generation use commands:\n'
-            '/image — generate an image\n'
-            '/video — create video from photo\n\n'
-            'After the trial — subscription {price} ⭐️/month.'
-        ),
-        'start_closed': 'Sorry, registration is closed — all spots are taken 🙏\n\nI\'ll notify you when the next wave opens.',
-        'help_text': (
-            'Just write me anything — I\'ll respond.\n\n'
-            'I can also:\n'
-            '🎤 Voice & video notes — transcribe\n'
-            '📷 Photos & PDFs — analyze\n'
-            '🌐 Web search — find current info\n'
-            '🎨 /image — generate an image\n'
-            '🎬 /video — generate video from photo\n'
-            '💳 /subscribe — subscription'
-        ),
-        'access_not_registered': 'Send /start to begin.',
-        'access_expired': 'Your trial period is over 😔\n\nGet a subscription — {price} ⭐️/month:\n\nOr leave feedback: @BX_Supp_bot',
-        'access_blocked': 'Access restricted.',
-        'sub_admin': 'You have unlimited access 😎',
-        'sub_title': '30-day subscription',
-        'sub_desc': 'Full access to the AI assistant for 30 days',
-        'sub_label': '30 days access',
-        'payment_ok': '✅ Payment received! Access open until {date}.\n\nThank you! Write to me anytime 🚀',
-        'img_start': '🎨 *Image generation*\n\nStep 1: Attach a reference photo.\nOr tap Skip to generate from scratch.',
-        'img_skip_btn': '⏭ Skip',
-        'img_got_photo': '✅ Photo received!\n\nStep 2: Write a prompt — what should be generated?',
-        'img_need_photo': 'Send a photo or tap Skip.',
-        'img_skip_msg': 'Step 2: Write a prompt — what to generate?',
-        'img_choose_ratio': '✅ Prompt: _{prompt}_\n\nStep 3: Choose format:',
-        'img_no_sub': '🔒 Image generation requires a subscription.\nGet one for {price} ⭐️/month — /subscribe',
-        'img_generating': '⏳ Generating ({ratio}){notice}...',
-        'img_free_notice': ' (free attempt)',
-        'vid_start': '🎬 *Video generation*\n\nSend a photo — we\'ll turn it into a video.',
-        'vid_need_photo': 'A photo is required. Send an image.',
-        'vid_got_photo': '📸 Photo received!\n\nWrite a prompt — what should happen in the video.\nOr send /skip for automatic motion.',
-        'vid_settings': '⚙️ Choose video settings:',
-        'vid_no_sub': '🔒 Video generation requires a subscription.\nGet one for {price} ⭐️/month — /subscribe',
-        'vid_generating': '⏳ Generating video {dur}s / {res}, ~30-90s...',
-        'cancelled': 'Cancelled.',
-        'topics_header': '📂 *My topics*\n{current}\n\nSelect a topic or create a new one:',
-        'topics_current': 'Now: *{name}*',
-        'topics_general': 'Now: general chat',
-        'topics_type_name': 'Enter the new topic name:',
-        'topics_exited': 'Exited topic. Back to general chat.',
-        'topics_create_btn': '+ Create topic',
-        'topics_exit_btn': '❌ Exit topic',
-        'topics_selected': '✅ Topic: *{name}*\n\nWrite — I\'ll reply in this topic\'s context.',
-        'topics_deleted': '🗑 Topic deleted.\n\nSelect a topic:',
-        'topics_created': '✅ Topic *{name}* created and selected!',
-        'topics_ask_goal': '✅ Topic: *{name}*\n\nWhat do you want to do in this topic? Write your goal or question — I\'ll focus on it right away.\nOr just write — I\'ll pick up the context.',
-        'topics_goal_set': '[{name}] Got it. Go ahead.',
-        'topics_save_as': '💡 Save this conversation as a topic?',
-        'topics_save_btn': '💾 Save as topic',
-        'topics_saved': '✅ Topic *{name}* created!',
-        'topics_detect_prompt': 'Identify in one short phrase (max 3 words) the topic of this conversation based on the last messages. Only the topic, no explanation.',
-        'voice_received': 'Voice message received, transcribing...',
-        'voice_no_speech': 'Could not recognize speech.',
-        'voice_recognized': 'Recognized: {text}',
-        'voice_error': 'Error processing voice message.',
-        'photo_received': 'Photo received, analyzing...',
-        'photo_caption': 'Describe in detail what is in this photo. Analysis only, no generation.',
-        'photo_error': 'Error processing photo.',
-        'gen_photo_confirm': '🎨 Got it, generating from your photo...',
-        'gen_choose_ratio': 'Choose format:',
-        'gen_no_sub': '🔒 Generation requires a subscription.\nGet one for {price} ⭐️/month — /subscribe',
-        'video_circle_received': 'Video note received, analyzing...',
-        'video_received': 'Video received, extracting audio...',
-        'video_unknown': 'Unknown video type.',
-        'video_no_speech': 'Could not recognize speech in the video.',
-        'video_error': 'Error processing video.',
-        'circle_prompt': 'Describe what is happening in this video note: who is there, what they are doing, what they say, the setting.',
-        'doc_pdf_received': 'PDF received, reading...',
-        'doc_pdf_prompt': 'Analyze this document in detail.',
-        'doc_img_received': 'Image received, analyzing...',
-        'doc_img_question': 'What is in this image?',
-        'doc_unsupported': 'I can only read PDFs and images for now.',
-        'doc_error': 'Error processing file.',
-        'remembered': 'Got it, remembered!',
-        'searching': 'Searching the web...',
-        'error_retry': 'Error, please try again.',
-        'lang_choose': '🌐 Выбери язык / Choose language:',
-        'lang_set_ru': '✅ Язык установлен: Русский 🇷🇺',
-        'lang_set_en': '✅ Language set: English 🇬🇧',
-        'remind_set': 'Напоминание установлено на {dt} 🔔',
-        'remind_text': '🔔 Напоминание: {text}',
-        'remind_no_time': 'Не понял время. Напиши например: напомни завтра в 10 позвонить Саше',
-        'remind_ics': '📅 Добавить в календарь:',
-        'remind_set': 'Reminder set for {dt} 🔔',
-        'remind_text': '🔔 Reminder: {text}',
-        'remind_no_time': 'Could not parse time. Try: remind me tomorrow at 10 to call John',
-        'remind_ics': '📅 Add to calendar:',
-        'notify_expiring': '⏰ Your subscription expires in 3 days.\n\nRenew now to avoid interruptions — /subscribe',
-        'notify_expired': '😔 Your subscription has expired.\n\nRenew — {price} ⭐️/month: /subscribe\n\nOr leave feedback: @BX_Supp_bot',
-        'search_keywords': ['find', 'search', 'look up', 'current', 'latest', 'news',
-                            'price', 'cost', 'requirements', 'rules', 'how now', 'check'],
-        'remember_keywords': ['remember that', 'remember:', 'always', 'never'],
-    }
+TIER_LIMITS = {
+    TIER_OWNER:      (99999, 99999, 99999),
+    TIER_VIP:        (99999, 99999, 99999),
+    TIER_SUBSCRIBER: (100, 5, 2),
+    TIER_BETA:       (20, 3, 1),
+    TIER_BLOCKED:    (0, 0, 0),
+}
+TIER_NAMES = {
+    TIER_OWNER:      "Владелец",
+    TIER_VIP:        "VIP",
+    TIER_SUBSCRIBER: "Подписчик",
+    TIER_BETA:       "Бета-тестер",
+    TIER_BLOCKED:    "Заблокирован",
 }
 
-def t(lang: str, key: str, **kwargs) -> str:
-    """Get translated string."""
-    s = STRINGS.get(lang, STRINGS['ru']).get(key, STRINGS['ru'].get(key, key))
-    if kwargs:
-        try:
-            s = s.format(**kwargs)
-        except Exception:
-            pass
-    return s
+DEFAULT_TOPICS = {
+    "работа":     "Shot Films, РМГ, видеопроекты, монтаж, клиенты",
+    "испания":    "Переезд, визы, жильё, жизнь в Испании",
+    "творческое": "Контент, идеи, AI-генерация, инста",
+    "личное":     "Семья, быт, здоровье",
+    "бот":        "Разработка бота, технические вопросы",
+}
 
-def make_keyboard(lang: str) -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        [
-            [KeyboardButton(t(lang, 'btn_image')), KeyboardButton(t(lang, 'btn_video'))],
-            [KeyboardButton(t(lang, 'btn_topics')), KeyboardButton(t(lang, 'btn_sub'))],
-            [KeyboardButton(t(lang, 'btn_help')), KeyboardButton(t(lang, 'btn_lang'))],
-        ],
-        resize_keyboard=True,
-        input_field_placeholder=t(lang, 'kb_placeholder')
-    )
+REMINDER_HARD = [
+    "поставь в календарь", "добавь в календарь",
+    "поставь напоминание", "добавь напоминание",
+    "поставь событие", "создай событие",
+    "поставь встречу", "добавь встречу", "запомни дату",
+]
+REMINDER_SOFT = ["напомни", "напоминание", "не забыть", "отметь"]
 
-# Conversation states
-IMG_PHOTO, IMG_PROMPT, IMG_SETTINGS = range(3)
-VID_PHOTO, VID_PROMPT, VID_SETTINGS = range(3, 6)
-ONB_STEP = 6
-TRIAL_DAYS = 5
-MAX_USERS = 5
-STARS_PRICE = 200
-SUB_DAYS = 30
-
-client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
+ai     = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
 tavily = TavilyClient(api_key=TAVILY_KEY)
 whisper = WhisperModel("tiny", device="cpu", compute_type="int8")
 
+# ══════════════════════════════════════════════════════════════════════════════
+# DATABASE
+# ══════════════════════════════════════════════════════════════════════════════
 def init_db():
-    conn = sqlite3.connect('memory.db')
+    conn = sqlite3.connect("memory.db")
     c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS messages
-                 (user_id INTEGER, role TEXT, content TEXT,
-                  timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS preferences
-                 (user_id INTEGER PRIMARY KEY, prefs TEXT DEFAULT '')''')
-    c.execute('''CREATE TABLE IF NOT EXISTS summaries
-                 (user_id INTEGER PRIMARY KEY, summary TEXT DEFAULT '',
-                  updated DATETIME DEFAULT CURRENT_TIMESTAMP)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS users (
+    c.execute("""CREATE TABLE IF NOT EXISTS messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER, role TEXT, content TEXT,
+        topic TEXT DEFAULT 'общее',
+        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)""")
+    c.execute("""CREATE TABLE IF NOT EXISTS preferences
+        (user_id INTEGER PRIMARY KEY, prefs TEXT DEFAULT '')""")
+    c.execute("""CREATE TABLE IF NOT EXISTS summaries
+        (user_id INTEGER PRIMARY KEY, summary TEXT DEFAULT '',
+         topic TEXT DEFAULT 'общее',
+         updated DATETIME DEFAULT CURRENT_TIMESTAMP)""")
+    c.execute("""CREATE TABLE IF NOT EXISTS topics
+        (user_id INTEGER, name TEXT, description TEXT DEFAULT '',
+         PRIMARY KEY(user_id, name))""")
+    c.execute("""CREATE TABLE IF NOT EXISTS topic_notes
+        (user_id INTEGER, topic TEXT, notes TEXT DEFAULT '',
+         updated DATETIME DEFAULT CURRENT_TIMESTAMP,
+         PRIMARY KEY(user_id, topic))""")
+    c.execute("""CREATE TABLE IF NOT EXISTS user_topic
+        (user_id INTEGER PRIMARY KEY, current_topic TEXT)""")
+    c.execute("""CREATE TABLE IF NOT EXISTS reminders (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER, title TEXT, remind_at DATETIME,
+        fired INTEGER DEFAULT 0)""")
+    c.execute("""CREATE TABLE IF NOT EXISTS users (
         user_id INTEGER PRIMARY KEY,
-        status TEXT DEFAULT 'trial',
-        trial_start DATETIME DEFAULT CURRENT_TIMESTAMP,
-        expires_at DATETIME DEFAULT NULL,
+        tier TEXT DEFAULT 'beta',
+        name TEXT DEFAULT '',
         username TEXT DEFAULT '',
-        image_count INTEGER DEFAULT 0,
-        language TEXT DEFAULT 'ru'
-    )''')
-    for col, default in [('image_count', '0'), ('language', "'ru'"), ('expires_at', 'NULL'), ('onboarded', '0')]:
+        created DATETIME DEFAULT CURRENT_TIMESTAMP)""")
+    c.execute("""CREATE TABLE IF NOT EXISTS daily_usage (
+        user_id INTEGER, day TEXT,
+        messages INTEGER DEFAULT 0,
+        images INTEGER DEFAULT 0,
+        videos INTEGER DEFAULT 0,
+        PRIMARY KEY(user_id, day))""")
+
+    # Миграции
+    for sql in [
+        "ALTER TABLE users ADD COLUMN tier TEXT DEFAULT 'beta'",
+        "ALTER TABLE users ADD COLUMN name TEXT DEFAULT ''",
+        "ALTER TABLE topics ADD COLUMN description TEXT DEFAULT ''",
+        "ALTER TABLE messages ADD COLUMN topic TEXT DEFAULT 'общее'",
+        "ALTER TABLE reminders ADD COLUMN title TEXT DEFAULT ''",
+        "ALTER TABLE reminders ADD COLUMN fired INTEGER DEFAULT 0",
+    ]:
         try:
-            dtype = 'INTEGER' if col in ('image_count', 'onboarded') else 'TEXT'
-            c.execute(f'ALTER TABLE users ADD COLUMN {col} {dtype} DEFAULT {default}')
-        except:
+            c.execute(sql)
+        except Exception:
             pass
+
+    c.execute("INSERT OR IGNORE INTO users (user_id, tier, name) VALUES (?,?,?)", (OWNER_ID, TIER_OWNER, "Pavel"))
+    c.execute("INSERT OR IGNORE INTO users (user_id, tier, name) VALUES (?,?,?)", (VIP_ID, TIER_VIP, "Wife"))
     conn.commit()
     conn.close()
 
-
-def is_onboarded(user_id):
-    conn = sqlite3.connect('memory.db')
+# ── Messages ──────────────────────────────────────────────────────────────────
+def get_history(user_id, topic=None, limit=20):
+    """
+    Возвращает историю, фильтруя [фото]-записи из СТАРЫХ диалогов.
+    Новые фото сохраняются как 'пользователь прислал фото: <caption>'.
+    """
+    conn = sqlite3.connect("memory.db")
     c = conn.cursor()
-    try:
-        c.execute('SELECT onboarded FROM users WHERE user_id = ?', (user_id,))
-        row = c.fetchone()
-        return bool(row and row[0])
-    except Exception:
-        return True
-    finally:
-        conn.close()
-
-def set_onboarded(user_id):
-    conn = sqlite3.connect('memory.db')
-    c = conn.cursor()
-    c.execute('UPDATE users SET onboarded=1 WHERE user_id=?', (user_id,))
-    conn.commit()
-    conn.close()
-def get_lang(user_id: int) -> str:
-    conn = sqlite3.connect('memory.db')
-    c = conn.cursor()
-    c.execute("SELECT language FROM users WHERE user_id = ?", (user_id,))
-    row = c.fetchone()
-    conn.close()
-    return (row[0] or 'ru') if row else 'ru'
-
-def set_lang(user_id: int, lang: str):
-    conn = sqlite3.connect('memory.db')
-    c = conn.cursor()
-    c.execute("UPDATE users SET language = ? WHERE user_id = ?", (lang, user_id))
-    conn.commit()
-    conn.close()
-
-def get_total_users():
-    conn = sqlite3.connect('memory.db')
-    c = conn.cursor()
-    c.execute("SELECT COUNT(*) FROM users WHERE user_id NOT IN ({})".format(
-        ','.join(str(i) for i in ADMIN_IDS)))
-    count = c.fetchone()[0]
-    conn.close()
-    return count
-
-def register_user(user_id, username=""):
-    conn = sqlite3.connect('memory.db')
-    c = conn.cursor()
-    c.execute("INSERT OR IGNORE INTO users (user_id, username) VALUES (?, ?)", (user_id, username))
-    conn.commit()
-    conn.close()
-
-def get_user_status(user_id):
-    conn = sqlite3.connect('memory.db')
-    c = conn.cursor()
-    c.execute("SELECT status, trial_start, expires_at FROM users WHERE user_id = ?", (user_id,))
-    row = c.fetchone()
-    conn.close()
-    return row
-
-def activate_subscription(user_id):
-    conn = sqlite3.connect('memory.db')
-    c = conn.cursor()
-    now = datetime.now(timezone.utc)
-    c.execute("SELECT expires_at FROM users WHERE user_id = ?", (user_id,))
-    row = c.fetchone()
-    if row and row[0]:
-        try:
-            current = datetime.fromisoformat(row[0])
-            if current.tzinfo is None:
-                current = current.replace(tzinfo=timezone.utc)
-            base = max(now, current)
-        except:
-            base = now
+    if topic and topic != "общее":
+        c.execute("""SELECT role, content FROM messages
+                     WHERE user_id=? AND topic=?
+                     ORDER BY timestamp DESC LIMIT ?""", (user_id, topic, limit))
     else:
-        base = now
-    new_expires = base + timedelta(days=SUB_DAYS)
-    c.execute("UPDATE users SET status='active', expires_at=? WHERE user_id=?",
-              (new_expires.isoformat(), user_id))
-    conn.commit()
-    conn.close()
-    return new_expires
-
-def is_allowed(user_id):
-    if user_id in ADMIN_IDS:
-        return True, None
-    row = get_user_status(user_id)
-    if not row:
-        return False, "not_registered"
-    status, trial_start, expires_at = row
-    if status == "blocked":
-        return False, "blocked"
-    if status == "active":
-        if expires_at:
-            exp = datetime.fromisoformat(expires_at)
-            if exp.tzinfo is None:
-                exp = exp.replace(tzinfo=timezone.utc)
-            if datetime.now(timezone.utc) > exp:
-                return False, "expired"
-        return True, None
-    start = datetime.fromisoformat(trial_start)
-    if start.tzinfo is None:
-        start = start.replace(tzinfo=timezone.utc)
-    days_passed = (datetime.now(timezone.utc) - start).days
-    if days_passed >= TRIAL_DAYS:
-        return False, "expired"
-    days_left = TRIAL_DAYS - days_passed
-    return True, f"trial_{days_left}"
-
-def get_history(user_id):
-    conn = sqlite3.connect('memory.db')
-    c = conn.cursor()
-    c.execute('SELECT role, content FROM messages WHERE user_id = ? ORDER BY timestamp DESC LIMIT 50', (user_id,))
+        c.execute("""SELECT role, content FROM messages
+                     WHERE user_id=?
+                     ORDER BY timestamp DESC LIMIT ?""", (user_id, limit))
     rows = c.fetchall()
     conn.close()
-    return [{"role": r[0], "content": r[1]} for r in reversed(rows)]
+    messages = []
+    for role, content in reversed(rows):
+        # Очищаем старые записи '[фото] ...' — они путают Claude
+        if content and content.startswith("[фото]"):
+            caption = content[6:].strip()
+            content = f"пользователь прислал фото{': ' + caption if caption else ''}"
+        messages.append({"role": role, "content": content})
+    return messages
+
+def save_message(user_id, role, content, topic="общее"):
+    conn = sqlite3.connect("memory.db")
+    c = conn.cursor()
+    c.execute("INSERT INTO messages (user_id, role, content, topic) VALUES (?,?,?,?)",
+              (user_id, role, content, topic))
+    conn.commit()
+    conn.close()
+
+def clear_history(user_id, topic=None):
+    conn = sqlite3.connect("memory.db")
+    c = conn.cursor()
+    if topic:
+        c.execute("DELETE FROM messages WHERE user_id=? AND topic=?", (user_id, topic))
+    else:
+        c.execute("DELETE FROM messages WHERE user_id=?", (user_id,))
+    conn.commit()
+    conn.close()
 
 def get_message_count(user_id):
-    conn = sqlite3.connect('memory.db')
+    conn = sqlite3.connect("memory.db")
     c = conn.cursor()
-    c.execute('SELECT COUNT(*) FROM messages WHERE user_id = ?', (user_id,))
-    count = c.fetchone()[0]
+    c.execute("SELECT COUNT(*) FROM messages WHERE user_id=?", (user_id,))
+    n = c.fetchone()[0]
     conn.close()
-    return count
+    return n
 
-def save_message(user_id, role, content):
-    conn = sqlite3.connect('memory.db')
+# ── Prefs / Summary ───────────────────────────────────────────────────────────
+def get_prefs(user_id):
+    conn = sqlite3.connect("memory.db")
     c = conn.cursor()
-    c.execute('INSERT INTO messages (user_id, role, content) VALUES (?, ?, ?)', (user_id, role, content))
+    c.execute("SELECT prefs FROM preferences WHERE user_id=?", (user_id,))
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row else ""
+
+def save_prefs(user_id, prefs):
+    conn = sqlite3.connect("memory.db")
+    c = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO preferences (user_id, prefs) VALUES (?,?)", (user_id, prefs))
     conn.commit()
     conn.close()
 
 def get_summary(user_id):
-    conn = sqlite3.connect('memory.db')
+    conn = sqlite3.connect("memory.db")
     c = conn.cursor()
-    c.execute('SELECT summary FROM summaries WHERE user_id = ?', (user_id,))
+    c.execute("SELECT summary FROM summaries WHERE user_id=?", (user_id,))
     row = c.fetchone()
     conn.close()
-    return row[0] if row else ''
+    return row[0] if row else ""
 
 def save_summary(user_id, summary):
-    conn = sqlite3.connect('memory.db')
+    conn = sqlite3.connect("memory.db")
     c = conn.cursor()
-    c.execute('INSERT OR REPLACE INTO summaries (user_id, summary, updated) VALUES (?, ?, CURRENT_TIMESTAMP)', (user_id, summary))
+    c.execute("INSERT OR REPLACE INTO summaries (user_id, summary, updated) VALUES (?,?,CURRENT_TIMESTAMP)",
+              (user_id, summary))
     conn.commit()
     conn.close()
 
-def get_prefs(user_id):
-    conn = sqlite3.connect('memory.db')
+# ── Tiers ─────────────────────────────────────────────────────────────────────
+def get_tier(user_id):
+    conn = sqlite3.connect("memory.db")
     c = conn.cursor()
-    c.execute('SELECT prefs FROM preferences WHERE user_id = ?', (user_id,))
+    c.execute("SELECT tier FROM users WHERE user_id=?", (user_id,))
     row = c.fetchone()
     conn.close()
-    return row[0] if row else ''
+    return row[0] if row else TIER_BETA
 
-def save_prefs(user_id, prefs):
-    conn = sqlite3.connect('memory.db')
+def set_tier(user_id, tier, name="", username=""):
+    conn = sqlite3.connect("memory.db")
     c = conn.cursor()
-    c.execute('INSERT OR REPLACE INTO preferences (user_id, prefs) VALUES (?, ?)', (user_id, prefs))
+    c.execute("INSERT OR REPLACE INTO users (user_id, tier, name, username) VALUES (?,?,?,?)",
+              (user_id, tier, name, username))
     conn.commit()
     conn.close()
 
-def needs_search(text, lang='ru'):
-    keywords = STRINGS[lang].get('search_keywords', STRINGS['ru']['search_keywords'])
-    return any(word in text.lower() for word in keywords)
-
-def web_search(query):
-    try:
-        result = tavily.search(query=query, max_results=3)
-        texts = [r['content'] for r in result['results']]
-        return "\n\n".join(texts[:3])
-    except Exception as e:
-        logger.error(f"Search error: {e}")
-        return ""
-
-async def update_summary(user_id):
-    count = get_message_count(user_id)
-    if count % 30 == 0 and count > 0:
-        history = get_history(user_id)
-        old_summary = get_summary(user_id)
-        messages = [{"role": "user", "content": f"Сделай краткое резюме этого диалога в 3-5 предложениях. Предыдущее резюме: {old_summary}\n\nНовые сообщения:\n" + "\n".join([f"{m['role']}: {m['content']}" for m in history])}]
-        response = client.messages.create(model="claude-sonnet-4-6", max_tokens=500, messages=messages)
-        save_summary(user_id, response.content[0].text)
-
-def get_system(user_id):
-    prefs = get_prefs(user_id)
-    summary = get_summary(user_id)
-    lang = get_lang(user_id)
-    if user_id in ADMIN_IDS:
-        system = """Ты личный семейный ассистент и проджект-менеджер.
-
-Автоматически определяй категорию каждого сообщения:
-- РАБОТА: задачи по видео, монтажу, правкам, клиентам, РМГ, Shot Films
-- ИСПАНИЯ: всё про переезд, жизнь в Испании, недвижимость, визы, животные
-- ТВОРЧЕСКОЕ: контент для инсты, видео промпты, идеи, AI-генерация
-- ЛИЧНОЕ: семья, быт, здоровье, личные дела
-
-В начале ответа пиши категорию в скобках, например (ИСПАНИЯ).
-Ты умеешь анализировать фото и документы.
-Если в контексте есть результаты поиска — используй их для ответа.
-Отвечай кратко и по делу."""
-    elif lang == 'en':
-        system = """You are a smart personal assistant.
-You can answer questions, analyze photos and documents, and search the internet.
-Reply concisely and to the point. Always respond in English."""
-    else:
-        system = """Ты умный персональный ассистент.
-Ты умеешь отвечать на вопросы, анализировать фото и документы, искать информацию в интернете.
-Отвечай кратко и по делу."""
-
-    if summary:
-        system += f"\n\nРезюме предыдущих разговоров:\n{summary}"
-    if prefs:
-        system += f"\n\nПредпочтения пользователя:\n{prefs}"
-    return system
-
-def get_image_count(user_id):
-    conn = sqlite3.connect('memory.db')
+def ensure_user(user_id, name="", username=""):
+    conn = sqlite3.connect("memory.db")
     c = conn.cursor()
-    c.execute("SELECT image_count FROM users WHERE user_id = ?", (user_id,))
+    c.execute("SELECT tier FROM users WHERE user_id=?", (user_id,))
     row = c.fetchone()
     conn.close()
-    return row[0] if row else 0
+    if not row:
+        set_tier(user_id, TIER_BETA, name, username)
+        return True
+    return False
 
-def increment_image_count(user_id):
-    conn = sqlite3.connect('memory.db')
+def get_usage(user_id):
+    today = date.today().isoformat()
+    conn = sqlite3.connect("memory.db")
     c = conn.cursor()
-    c.execute("UPDATE users SET image_count = image_count + 1 WHERE user_id = ?", (user_id,))
+    c.execute("SELECT messages, images, videos FROM daily_usage WHERE user_id=? AND day=?", (user_id, today))
+    row = c.fetchone()
+    conn.close()
+    return row if row else (0, 0, 0)
+
+def inc_usage(user_id, field):
+    today = date.today().isoformat()
+    conn = sqlite3.connect("memory.db")
+    c = conn.cursor()
+    c.execute("INSERT OR IGNORE INTO daily_usage (user_id, day) VALUES (?,?)", (user_id, today))
+    c.execute(f"UPDATE daily_usage SET {field}={field}+1 WHERE user_id=? AND day=?", (user_id, today))
     conn.commit()
     conn.close()
 
-def can_generate_image(user_id):
-    if user_id in ADMIN_IDS:
-        return True, None
-    row = get_user_status(user_id)
-    if not row:
-        return False, "not_registered"
-    status, _, expires_at = row
-    if status == "active":
-        if expires_at:
-            exp = datetime.fromisoformat(expires_at)
-            if exp.tzinfo is None:
-                exp = exp.replace(tzinfo=timezone.utc)
-            if datetime.now(timezone.utc) > exp:
-                return False, "no_sub"
-        return True, None
-    count = get_image_count(user_id)
-    if count < 3:
-        return True, "free_image"
-    return False, "no_sub"
+def check_limit(user_id, field):
+    tier = get_tier(user_id)
+    idx = {"messages": 0, "images": 1, "videos": 2}[field]
+    return get_usage(user_id)[idx] < TIER_LIMITS[tier][idx]
 
-def can_generate_video(user_id):
-    if user_id in ADMIN_IDS:
-        return True, None
-    row = get_user_status(user_id)
-    if not row:
-        return False, "not_registered"
-    status, _, expires_at = row
-    if status == "active":
-        if expires_at:
-            exp = datetime.fromisoformat(expires_at)
-            if exp.tzinfo is None:
-                exp = exp.replace(tzinfo=timezone.utc)
-            if datetime.now(timezone.utc) > exp:
-                return False, "no_sub"
-        return True, None
-    return False, "no_sub"
-
-async def wavespeed_request(endpoint: str, payload: dict) -> str:
-    headers = {
-        "Authorization": f"Bearer {WAVESPEED_KEY}",
-        "Content-Type": "application/json"
-    }
-    async with httpx.AsyncClient(timeout=30) as http:
-        resp = await http.post(
-            f"https://api.wavespeed.ai/api/v3/{endpoint}",
-            json=payload, headers=headers
-        )
-        data = resp.json()
-        request_id = data.get("data", {}).get("id")
-        if not request_id:
-            raise Exception(f"API error: {data}")
-        for _ in range(90):
-            await asyncio.sleep(2)
-            poll = await http.get(
-                f"https://api.wavespeed.ai/api/v3/predictions/{request_id}",
-                headers=headers
-            )
-            result = poll.json()
-            status = result.get("data", {}).get("status")
-            if status == "completed":
-                outputs = result["data"].get("outputs", [])
-                if outputs:
-                    return outputs[0]
-                raise Exception("No outputs in response")
-            elif status in ("failed", "canceled"):
-                raise Exception(result.get("data", {}).get("error", "Unknown error"))
-        raise Exception("Generation timeout")
-
-# ── /language command ─────────────────────────────────────────────────────────
-
-async def cmd_language(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = InlineKeyboardMarkup([[
-        InlineKeyboardButton("🇷🇺 Русский", callback_data="setlang_ru"),
-        InlineKeyboardButton("🇬🇧 English", callback_data="setlang_en"),
-    ]])
-    lang = get_lang(update.effective_user.id)
-    await update.message.reply_text(t(lang, 'lang_choose'), reply_markup=keyboard)
-
-async def lang_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user_id = query.from_user.id
-    new_lang = query.data.replace("setlang_", "")
-    set_lang(user_id, new_lang)
-    msg = t(new_lang, 'lang_set_ru') if new_lang == 'ru' else t(new_lang, 'lang_set_en')
-    await query.edit_message_text(msg)
-    # Send updated keyboard
-    await context.bot.send_message(
-        chat_id=user_id,
-        text="👇",
-        reply_markup=make_keyboard(new_lang)
-    )
+def tier_info_text(user_id):
+    tier = get_tier(user_id)
+    limits = TIER_LIMITS[tier]
+    usage = get_usage(user_id)
+    name = TIER_NAMES[tier]
+    if limits[0] > 9000:
+        return f"Тариф: {name} (без ограничений)"
+    return (f"Тариф: {name}\n"
+            f"Сообщения: {usage[0]}/{limits[0]}\n"
+            f"Картинки: {usage[1]}/{limits[1]}\n"
+            f"Видео: {usage[2]}/{limits[2]}")
 
 # ── Topics ────────────────────────────────────────────────────────────────────
-
-def init_topics(conn):
+def get_user_topic(user_id):
+    conn = sqlite3.connect("memory.db")
     c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS topics (
-        topic_id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER,
-        name TEXT,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )''')
-    c.execute('''CREATE TABLE IF NOT EXISTS topic_messages (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER,
-        topic_id INTEGER,
-        role TEXT,
-        content TEXT,
-        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-    )''')
+    c.execute("SELECT current_topic FROM user_topic WHERE user_id=?", (user_id,))
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row else None
+
+def set_user_topic(user_id, topic):
+    conn = sqlite3.connect("memory.db")
+    c = conn.cursor()
+    if topic is None:
+        c.execute("DELETE FROM user_topic WHERE user_id=?", (user_id,))
+    else:
+        c.execute("INSERT OR REPLACE INTO user_topic (user_id, current_topic) VALUES (?,?)", (user_id, topic))
     conn.commit()
+    conn.close()
 
-def get_topics(user_id):
-    conn = sqlite3.connect('memory.db')
-    init_topics(conn)
+def get_user_topics(user_id):
+    conn = sqlite3.connect("memory.db")
     c = conn.cursor()
-    c.execute("SELECT topic_id, name FROM topics WHERE user_id = ? ORDER BY created_at DESC", (user_id,))
+    c.execute("SELECT name, description FROM topics WHERE user_id=?", (user_id,))
+    custom = {r[0]: r[1] for r in c.fetchall()}
+    conn.close()
+    result = dict(DEFAULT_TOPICS)
+    result.update(custom)
+    return result
+
+def add_user_topic(user_id, name, description=""):
+    conn = sqlite3.connect("memory.db")
+    c = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO topics (user_id, name, description) VALUES (?,?,?)",
+              (user_id, name.lower(), description))
+    conn.commit()
+    conn.close()
+
+def get_topic_notes(user_id, topic):
+    conn = sqlite3.connect("memory.db")
+    c = conn.cursor()
+    c.execute("SELECT notes FROM topic_notes WHERE user_id=? AND topic=?", (user_id, topic))
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row else ""
+
+def save_topic_notes(user_id, topic, notes):
+    conn = sqlite3.connect("memory.db")
+    c = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO topic_notes (user_id, topic, notes, updated) VALUES (?,?,?,CURRENT_TIMESTAMP)",
+              (user_id, topic, notes))
+    conn.commit()
+    conn.close()
+
+def detect_topic(text, user_id):
+    topics = get_user_topics(user_id)
+    topic_list = "\n".join([f"- {name}: {desc}" for name, desc in topics.items()])
+    try:
+        resp = ai.messages.create(
+            model="claude-haiku-4-5-20251001", max_tokens=20,
+            messages=[{"role": "user", "content": (
+                f"Определи тему сообщения из списка:\n{topic_list}\n\n"
+                f"Сообщение: {text}\n\nОтветь ТОЛЬКО одним словом — название темы или 'общее'."
+            )}]
+        )
+        detected = resp.content[0].text.strip().lower().strip(".")
+        if detected in topics:
+            return detected
+        for t in topics:
+            if t in detected or detected in t:
+                return t
+        return "общее"
+    except Exception:
+        return "общее"
+
+async def maybe_update_notes(user_id, topic, history):
+    conn = sqlite3.connect("memory.db")
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM messages WHERE user_id=? AND topic=?", (user_id, topic))
+    cnt = c.fetchone()[0]
+    conn.close()
+    if cnt > 0 and cnt % 10 == 0:
+        old_notes = get_topic_notes(user_id, topic)
+        dialogue = "\n".join([f"{m['role']}: {m['content'][:200]}" for m in history[-10:]])
+        try:
+            resp = ai.messages.create(
+                model="claude-haiku-4-5-20251001", max_tokens=300,
+                messages=[{"role": "user", "content": (
+                    f"Обнови заметки по теме '{topic}'.\nСтарые: {old_notes}\n\n"
+                    f"Диалог:\n{dialogue}\n\nТолько важные факты, решения — до 200 слов."
+                )}]
+            )
+            save_topic_notes(user_id, topic, resp.content[0].text)
+        except Exception:
+            pass
+
+# ── Reminders ─────────────────────────────────────────────────────────────────
+def detect_reminder(text):
+    t = text.lower()
+    if any(kw in t for kw in REMINDER_HARD):
+        return True
+    if any(kw in t for kw in REMINDER_SOFT):
+        try:
+            resp = ai.messages.create(
+                model="claude-haiku-4-5-20251001", max_tokens=5,
+                messages=[{"role": "user", "content": (
+                    f"Это запрос создать событие в календарь (с датой/временем) "
+                    f"или просьба вспомнить что-то? Только 'календарь' или 'вспомнить': {text}"
+                )}]
+            )
+            return "календарь" in resp.content[0].text.strip().lower()
+        except Exception:
+            return False
+    return False
+
+def parse_reminder(text):
+    today = date.today().strftime("%Y-%m-%d")
+    try:
+        resp = ai.messages.create(
+            model="claude-haiku-4-5-20251001", max_tokens=80,
+            messages=[{"role": "user", "content": (
+                f"Сегодня {today}. Извлеки дату/время и название события.\n"
+                f"Ответ СТРОГО: YYYY-MM-DD HH:MM | Название\n"
+                f"Если время не указано — 09:00.\nТекст: {text}"
+            )}]
+        )
+        parts = resp.content[0].text.strip().split("|")
+        dt_str = parts[0].strip()
+        title = parts[1].strip() if len(parts) > 1 else text[:60]
+        dt = datetime.strptime(dt_str, "%Y-%m-%d %H:%M")
+        return dt, title
+    except Exception as e:
+        logger.error(f"parse_reminder: {e}")
+        return None, None
+
+def make_ics(title, dt):
+    uid = str(uuid.uuid4())
+    stamp = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    dtstart = dt.strftime("%Y%m%dT%H%M%S")
+    dtend = (dt + timedelta(hours=1)).strftime("%Y%m%dT%H%M%S")
+    lines = [
+        "BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//BX Bot//RU",
+        "BEGIN:VEVENT",
+        f"UID:{uid}", f"DTSTAMP:{stamp}", f"DTSTART:{dtstart}", f"DTEND:{dtend}",
+        f"SUMMARY:{title}",
+        "BEGIN:VALARM", "TRIGGER:-PT30M", "ACTION:DISPLAY", f"DESCRIPTION:{title}", "END:VALARM",
+        "END:VEVENT", "END:VCALENDAR",
+    ]
+    return "\r\n".join(lines)
+
+def save_reminder(user_id, title, remind_at):
+    conn = sqlite3.connect("memory.db")
+    c = conn.cursor()
+    c.execute("INSERT INTO reminders (user_id, title, remind_at) VALUES (?,?,?)",
+              (user_id, title, remind_at))
+    conn.commit()
+    conn.close()
+
+def get_due_reminders():
+    conn = sqlite3.connect("memory.db")
+    c = conn.cursor()
+    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    c.execute("SELECT id, user_id, title FROM reminders WHERE fired=0 AND remind_at<=?", (now,))
     rows = c.fetchall()
     conn.close()
     return rows
 
-def create_topic(user_id, name):
-    conn = sqlite3.connect('memory.db')
-    init_topics(conn)
+def mark_reminder_fired(rid):
+    conn = sqlite3.connect("memory.db")
     c = conn.cursor()
-    c.execute("INSERT INTO topics (user_id, name) VALUES (?, ?)", (user_id, name))
-    topic_id = c.lastrowid
-    conn.commit()
-    conn.close()
-    return topic_id
-
-def delete_topic(topic_id, user_id):
-    conn = sqlite3.connect('memory.db')
-    c = conn.cursor()
-    c.execute("DELETE FROM topics WHERE topic_id = ? AND user_id = ?", (topic_id, user_id))
-    c.execute("DELETE FROM topic_messages WHERE topic_id = ? AND user_id = ?", (topic_id, user_id))
+    c.execute("UPDATE reminders SET fired=1 WHERE id=?", (rid,))
     conn.commit()
     conn.close()
 
-def get_topic_history(user_id, topic_id):
-    conn = sqlite3.connect('memory.db')
-    c = conn.cursor()
-    c.execute("SELECT role, content FROM topic_messages WHERE user_id = ? AND topic_id = ? ORDER BY timestamp DESC LIMIT 50",
-              (user_id, topic_id))
-    rows = c.fetchall()
-    conn.close()
-    return [{"role": r[0], "content": r[1]} for r in reversed(rows)]
-
-def save_topic_message(user_id, topic_id, role, content):
-    conn = sqlite3.connect('memory.db')
-    init_topics(conn)
-    c = conn.cursor()
-    c.execute("INSERT INTO topic_messages (user_id, topic_id, role, content) VALUES (?, ?, ?, ?)",
-              (user_id, topic_id, role, content))
-    conn.commit()
-    conn.close()
-
-def get_active_topic(context):
-    return context.user_data.get('active_topic_id'), context.user_data.get('active_topic_name')
-
-def set_active_topic(context, topic_id, name):
-    context.user_data['active_topic_id'] = topic_id
-    context.user_data['active_topic_name'] = name
-
-def clear_active_topic(context):
-    context.user_data.pop('active_topic_id', None)
-    context.user_data.pop('active_topic_name', None)
-
-async def cmd_topics(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await check_access(update):
-        return
-    user_id = update.effective_user.id
-    lang = get_lang(user_id)
-    topics = get_topics(user_id)
-    active_id, active_name = get_active_topic(context)
-
-    keyboard = []
-    for tid, name in topics:
-        marker = "✅ " if tid == active_id else ""
-        keyboard.append([
-            InlineKeyboardButton(f"{marker}{name}", callback_data=f"topic_select_{tid}_{name}"),
-            InlineKeyboardButton("🗑", callback_data=f"topic_delete_{tid}")
-        ])
-    keyboard.append([InlineKeyboardButton(t(lang, 'topics_create_btn'), callback_data="topic_create")])
-    if active_id:
-        keyboard.append([InlineKeyboardButton(t(lang, 'topics_exit_btn'), callback_data="topic_exit")])
-
-    current = t(lang, 'topics_current', name=active_name) if active_name else t(lang, 'topics_general')
+async def send_reminder_ics(update, context, title, dt, user_id):
+    ics_bytes = io.BytesIO(make_ics(title, dt).encode("utf-8"))
+    ics_bytes.name = "reminder.ics"
+    save_reminder(user_id, title, dt.strftime("%Y-%m-%d %H:%M"))
     await update.message.reply_text(
-        t(lang, 'topics_header', current=current),
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard)
+        f"✅ Напоминание создано!\n"
+        f"📅 {title}\n"
+        f"🕐 {dt.strftime('%d.%m.%Y %H:%M')}\n\n"
+        f"Открой .ics чтобы добавить в iPhone Calendar:"
+    )
+    await context.bot.send_document(
+        chat_id=update.effective_chat.id,
+        document=ics_bytes,
+        filename="reminder.ics"
     )
 
-async def topics_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user_id = update.effective_user.id
-    lang = get_lang(user_id)
-    data = query.data
-
-    if data == "topic_create":
-        await query.edit_message_text(t(lang, 'topics_type_name'))
-        context.user_data['waiting_topic_name'] = True
-        return
-
-    if data == "topic_exit":
-        clear_active_topic(context)
-        await query.edit_message_text(t(lang, 'topics_exited'))
-        return
-
-    if data.startswith("topic_select_"):
-        parts = data.split("_", 3)
-        tid = int(parts[2])
-        name = parts[3]
-        set_active_topic(context, tid, name)
-        # Ask for goal/context for this topic session
-        goal_text = t(lang, 'topics_ask_goal', name=name)
-        await query.edit_message_text(goal_text, parse_mode="Markdown")
-        context.user_data['topic_awaiting_goal'] = True
-        return
-
-    if data.startswith("topic_autosave_"):
-        name = data.replace("topic_autosave_", "")
-        tid = create_topic(user_id, name)
-        set_active_topic(context, tid, name)
-        await query.edit_message_text(t(lang, 'topics_saved', name=name), parse_mode="Markdown")
-        return
-
-    if data.startswith("topic_delete_"):
-        tid = int(data.split("_")[2])
-        active_id, _ = get_active_topic(context)
-        if active_id == tid:
-            clear_active_topic(context)
-        delete_topic(tid, user_id)
-        topics = get_topics(user_id)
-        keyboard = []
-        for t_id, name in topics:
-            keyboard.append([
-                InlineKeyboardButton(name, callback_data=f"topic_select_{t_id}_{name}"),
-                InlineKeyboardButton("🗑", callback_data=f"topic_delete_{t_id}")
-            ])
-        keyboard.append([InlineKeyboardButton(t(lang, 'topics_create_btn'), callback_data="topic_create")])
-        await query.edit_message_text(
-            t(lang, 'topics_deleted'),
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-
-
-# ── Onboarding ───────────────────────────────────────────────────────────────
-ONB_MESSAGES = {
-    'ru': [
-        ('Привет! Я твой AI-ассистент. Давай покажу что умею за 30 секунд 👇', None),
-        ('🎤 *Голос и кружочки*\nПросто отправь голосовое — расшифрую и отвечу.\n\n📷 *Фото и PDF*\nОтправь любое фото или документ — проанализирую.', None),
-        ('🌐 *Веб-поиск*\nСпроси что угодно — найду актуальную информацию в интернете.\n\n🧠 *Память*\nЗапомню твои предпочтения и веду контекст разговора.', None),
-        ('🎨 *Генерация изображений*\nНажми кнопку ниже или напиши /image\n\n🎬 *Видео из фото*\nИз любого фото сделаю короткое видео — /video', None),
-        ('📂 *Темы*\nСоздавай темы для разных задач — Работа, Испания, Идеи. Бот сам предложит сохранить разговор.\n\n🔔 *Напоминания*\nНапиши «напомни завтра в 10 позвонить» — поставлю.', None),
-        ('Всё готово! Просто пиши мне — я всегда здесь 🚀\n\nЕсли что-то непонятно — /help', 'done'),
-    ],
-    'en': [
-        ('Hi! I\'m your AI assistant. Let me show you what I can do in 30 seconds 👇', None),
-        ('🎤 *Voice & video notes*\nSend a voice message — I\'ll transcribe and reply.\n\n📷 *Photos & PDFs*\nSend any photo or document — I\'ll analyze it.', None),
-        ('🌐 *Web search*\nAsk anything — I\'ll find current info from the internet.\n\n🧠 *Memory*\nI remember your preferences and keep conversation context.', None),
-        ('🎨 *Image generation*\nTap the button or type /image\n\n🎬 *Video from photo*\nI\'ll turn any photo into a short video — /video', None),
-        ('📂 *Topics*\nCreate topics for different tasks. I\'ll suggest saving conversations automatically.\n\n🔔 *Reminders*\nWrite «remind me tomorrow at 10 to call John» — I\'ll set it.', None),
-        ('All set! Just write to me — I\'m always here 🚀\n\nIf you need help — /help', 'done'),
+# ── Search ────────────────────────────────────────────────────────────────────
+def needs_search(text):
+    keywords = [
+        "найди", "поищи", "что сейчас", "актуально", "новости",
+        "цена", "стоимость", "сколько стоит", "курс", "погода",
+        "виза", "консульство", "требования", "можно ли сейчас",
+        "расписание", "рейс", "билеты", "на сегодня",
+        "последняя версия", "что нового", "2024", "2025", "2026",
     ]
-}
-
-async def send_onboarding_step(update_or_msg, context, step, lang):
-    msgs = ONB_MESSAGES.get(lang, ONB_MESSAGES['ru'])
-    if step >= len(msgs):
-        return ConversationHandler.END
-    text, action = msgs[step]
-    if action == 'done':
-        kb = None
-    else:
-        next_label = 'Далее →' if lang == 'ru' else 'Next →'
-        skip_label = 'Пропустить' if lang == 'ru' else 'Skip'
-        kb = InlineKeyboardMarkup([[
-            InlineKeyboardButton(next_label, callback_data='onb_next'),
-            InlineKeyboardButton(skip_label, callback_data='onb_skip'),
-        ]])
-    msg = update_or_msg if hasattr(update_or_msg, 'reply_text') else update_or_msg.message
-    await msg.reply_text(text, parse_mode='Markdown', reply_markup=kb)
-    return ONB_STEP
-
-async def onb_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user_id = query.from_user.id
-    lang = get_lang(user_id)
-    if query.data == 'onb_skip':
-        set_onboarded(user_id)
-        done = 'Окей, начинаем! Пиши мне что угодно 🚀' if lang == 'ru' else 'All good! Write me anything 🚀'
-        await query.edit_message_text(done)
-        return ConversationHandler.END
-    step = context.user_data.get('onb_step', 0) + 1
-    context.user_data['onb_step'] = step
-    msgs = ONB_MESSAGES.get(lang, ONB_MESSAGES['ru'])
-    if step >= len(msgs):
-        set_onboarded(user_id)
-        await query.edit_message_text(msgs[-1][0], parse_mode='Markdown')
-        return ConversationHandler.END
-    text, action = msgs[step]
-    if action == 'done':
-        set_onboarded(user_id)
-        await query.edit_message_text(text, parse_mode='Markdown')
-        return ConversationHandler.END
-    next_label = 'Далее →' if lang == 'ru' else 'Next →'
-    skip_label = 'Пропустить' if lang == 'ru' else 'Skip'
-    kb = InlineKeyboardMarkup([[
-        InlineKeyboardButton(next_label, callback_data='onb_next'),
-        InlineKeyboardButton(skip_label, callback_data='onb_skip'),
-    ]])
-    await query.edit_message_text(text, parse_mode='Markdown', reply_markup=kb)
-    return ONB_STEP
-
-onb_conv = ConversationHandler(
-    entry_points=[],
-    states={ONB_STEP: [CallbackQueryHandler(onb_callback, pattern='^onb_')]},
-    fallbacks=[],
-    per_user=True, per_chat=True,
-)
-# ── /image conversation ────────────────────────────────────────────────────────
-
-async def cmd_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await check_access(update):
-        return ConversationHandler.END
-    user_id = update.effective_user.id
-    lang = get_lang(user_id)
-    context.user_data.pop("img_ref", None)
-    context.user_data.pop("prompt", None)
-    keyboard = [[InlineKeyboardButton(t(lang, 'img_skip_btn'), callback_data="img_skip_photo")]]
-    await update.message.reply_text(
-        t(lang, 'img_start'),
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-    return IMG_PHOTO
-
-async def img_receive_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    lang = get_lang(update.effective_user.id)
-    if update.message.photo:
-        photo = update.message.photo[-1]
-        file = await context.bot.get_file(photo.file_id)
-        file_bytes = await file.download_as_bytearray()
-        context.user_data["img_ref"] = base64.standard_b64encode(file_bytes).decode()
-        await update.message.reply_text(t(lang, 'img_got_photo'))
-        return IMG_PROMPT
-    await update.message.reply_text(t(lang, 'img_need_photo'))
-    return IMG_PHOTO
-
-async def img_skip_photo_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    lang = get_lang(query.from_user.id)
-    await query.edit_message_text(t(lang, 'img_skip_msg'))
-    return IMG_PROMPT
-
-async def img_receive_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message.text:
-        return IMG_PROMPT
-    lang = get_lang(update.effective_user.id)
-    context.user_data["prompt"] = update.message.text
-    keyboard = [[
-        InlineKeyboardButton("1:1 📷", callback_data="ratio_1:1"),
-        InlineKeyboardButton("16:9 🖥", callback_data="ratio_16:9"),
-        InlineKeyboardButton("9:16 📱", callback_data="ratio_9:16"),
-    ]]
-    await update.message.reply_text(
-        t(lang, 'img_choose_ratio', prompt=update.message.text[:80]),
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-    return IMG_SETTINGS
-
-async def img_settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if not query.data.startswith("ratio_"):
-        return
-    await query.answer()
-    user_id = update.effective_user.id
-    lang = get_lang(user_id)
-    allowed, reason = can_generate_image(user_id)
-    if not allowed:
-        await query.edit_message_text(t(lang, 'img_no_sub', price=STARS_PRICE))
-        return ConversationHandler.END
-    ratio = query.data.replace("ratio_", "")
-    notice = t(lang, 'img_free_notice') if reason == "free_image" else ""
-    await query.edit_message_text(t(lang, 'img_generating', ratio=ratio, notice=notice))
-
-    prompt = context.user_data.get("prompt", "")
-    img_ref = context.user_data.get("img_ref")
-    try:
-        if img_ref:
-            payload = {
-                "prompt": prompt,
-                "image": f"data:image/jpeg;base64,{img_ref}",
-                "aspect_ratio": ratio,
-                "strength": 0.75,
-                "num_inference_steps": 28,
-                "guidance_scale": 3.5,
-            }
-            url = await wavespeed_request("wavespeed-ai/flux-dev", payload)
-        else:
-            payload = {
-                "prompt": prompt,
-                "aspect_ratio": ratio,
-                "num_inference_steps": 4,
-            }
-            url = await wavespeed_request("wavespeed-ai/flux-schnell", payload)
-        increment_image_count(user_id)
-        await query.message.reply_photo(photo=url, caption=f"✅ {prompt[:200]}")
-    except Exception as e:
-        logger.error(f"Image gen error: {e}")
-        await query.message.reply_text(f"Error: {e}")
-    return ConversationHandler.END
-
-# ── /video conversation ────────────────────────────────────────────────────────
-
-async def cmd_video_gen(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await check_access(update):
-        return ConversationHandler.END
-    user_id = update.effective_user.id
-    lang = get_lang(user_id)
-    context.user_data.clear()
-    await update.message.reply_text(t(lang, 'vid_start'), parse_mode="Markdown")
-    return VID_PHOTO
-
-async def vid_receive_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    lang = get_lang(update.effective_user.id)
-    if not update.message.photo:
-        await update.message.reply_text(t(lang, 'vid_need_photo'))
-        return VID_PHOTO
-    photo = update.message.photo[-1]
-    file = await context.bot.get_file(photo.file_id)
-    file_bytes = await file.download_as_bytearray()
-    context.user_data["vid_photo"] = base64.standard_b64encode(file_bytes).decode()
-    await update.message.reply_text(t(lang, 'vid_got_photo'))
-    return VID_PROMPT
-
-async def vid_receive_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    lang = get_lang(update.effective_user.id)
-    if update.message.text and update.message.text.strip() == "/skip":
-        context.user_data["vid_prompt"] = "Smooth cinematic motion, high quality"
-    else:
-        context.user_data["vid_prompt"] = update.message.text or "Smooth cinematic motion"
-    keyboard = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("⏱ 5s / 480p", callback_data="vd_5_480p"),
-            InlineKeyboardButton("⏱ 5s / 720p", callback_data="vd_5_720p"),
-        ],
-        [
-            InlineKeyboardButton("⏱ 10s / 480p", callback_data="vd_10_480p"),
-            InlineKeyboardButton("⏱ 10s / 720p", callback_data="vd_10_720p"),
-        ],
-    ])
-    await update.message.reply_text(t(lang, 'vid_settings'), reply_markup=keyboard)
-    return VID_SETTINGS
-
-async def vid_settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user_id = query.from_user.id
-    lang = get_lang(user_id)
-    parts = query.data.split("_")
-    duration = int(parts[1])
-    resolution = parts[2]
-    context.user_data["vid_duration"] = duration
-    context.user_data["vid_resolution"] = resolution
-    endpoint = "bytedance/seedance-2-0-mini-i2v-720p" if resolution == "720p" else "bytedance/seedance-2-0-mini-i2v-480p"
-
-    allowed, reason = can_generate_video(user_id)
-    if not allowed:
-        await query.edit_message_text(t(lang, 'vid_no_sub', price=STARS_PRICE))
-        return ConversationHandler.END
-
-    await query.edit_message_text(t(lang, 'vid_generating', dur=duration, res=resolution))
-    photo_b64 = context.user_data.get("vid_photo", "")
-    prompt = context.user_data.get("vid_prompt", "Smooth cinematic motion")
-    try:
-        payload = {
-            "image": f"data:image/jpeg;base64,{photo_b64}",
-            "prompt": prompt,
-            "duration": duration,
-            "resolution": resolution,
-        }
-        url = await wavespeed_request(endpoint, payload)
-        await query.message.reply_video(video=url, caption=f"✅ {duration}s / {resolution}\n{prompt[:180]}")
-    except Exception as e:
-        logger.error(f"Video gen error: {e}")
-        await query.message.reply_text(f"Error: {e}")
-    return ConversationHandler.END
-
-
-async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await check_access(update):
-        return
-    user_id = update.effective_user.id
-    lang = get_lang(user_id)
-    conn = sqlite3.connect('memory.db')
-    c = conn.cursor()
-    c.execute("DELETE FROM messages WHERE user_id = ?", (user_id,))
-    c.execute("DELETE FROM summaries WHERE user_id = ?", (user_id,))
-    conn.commit()
-    conn.close()
-    context.user_data.clear()
-    msgs = {"en": "History cleared. Starting fresh.", "ru": "История очищена. Начинаем с чистого листа."}
-    await update.message.reply_text(msgs.get(lang, msgs["ru"]))
-
-async def cmd_memory(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await check_access(update):
-        return
-    user_id = update.effective_user.id
-    lang = get_lang(user_id)
-    prefs = get_prefs(user_id)
-    summary = get_summary(user_id)
-    msg_count = get_message_count(user_id)
-    lines = []
-    if lang == "en":
-        lines += ["*What I remember:*", "", "Messages: " + str(msg_count)]
-        if summary:
-            lines += ["", "*Summary:*", summary]
-        if prefs:
-            lines += ["", "*Preferences:*", prefs]
-        if not summary and not prefs:
-            lines.append("Nothing yet. Keep chatting.")
-    else:
-        lines += ["*Что я о тебе знаю:*", "", "Сообщений: " + str(msg_count)]
-        if summary:
-            lines += ["", "*Резюме:*", summary]
-        if prefs:
-            lines += ["", "*Предпочтения:*", prefs]
-        if not summary and not prefs:
-            lines.append("Пока ничего. Общайся — буду запоминать.")
-    await update.message.reply_text(chr(10).join(lines), parse_mode="Markdown")
-
-async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id not in ADMIN_IDS:
-        return
-    conn = sqlite3.connect('memory.db')
-    c = conn.cursor()
-    c.execute("SELECT user_id, username, status, trial_start, expires_at, image_count FROM users")
-    users = c.fetchall()
-    conn.close()
-    lines = ["*Пользователи бота:*", ""]
-    for uid, uname, status, trial, expires, imgs in users:
-        crown = "👑 " if uid in ADMIN_IDS else ""
-        name = "@" + uname if uname else str(uid)
-        exp = expires[:10] if expires else ((trial[:10] + " (триал)") if trial else "—")
-        lines.append(crown + name + " | " + status + " | до " + exp + " | фото: " + str(imgs))
-    lines += ["", "Всего: " + str(len(users)) + " | Лимит: " + str(MAX_USERS), "", "/activate ID — активировать", "/block ID — заблокировать"]
-    await update.message.reply_text(chr(10).join(lines), parse_mode="Markdown")
-
-async def cmd_activate(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id not in ADMIN_IDS:
-        return
-    if not context.args:
-        await update.message.reply_text("Использование: /activate USER_ID")
-        return
-    try:
-        target_id = int(context.args[0])
-        expires = activate_subscription(target_id)
-        await update.message.reply_text("Подписка активирована до " + expires.strftime("%d.%m.%Y"))
-        try:
-            await context.bot.send_message(target_id, "Подписка активирована! Пиши в любое время.")
-        except Exception:
-            pass
-    except ValueError:
-        await update.message.reply_text("Неверный ID")
-
-async def cmd_block(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id not in ADMIN_IDS:
-        return
-    if not context.args:
-        await update.message.reply_text("Использование: /block USER_ID")
-        return
-    try:
-        target_id = int(context.args[0])
-        conn = sqlite3.connect('memory.db')
-        c = conn.cursor()
-        c.execute("UPDATE users SET status='blocked' WHERE user_id=?", (target_id,))
-        conn.commit()
-        conn.close()
-        await update.message.reply_text("Пользователь заблокирован.")
-    except ValueError:
-        await update.message.reply_text("Неверный ID")
-async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    lang = get_lang(update.effective_user.id)
-    context.user_data.clear()
-    await update.message.reply_text(t(lang, 'cancelled'))
-    return ConversationHandler.END
-
-init_db()
-
-
-# ── Reminders ────────────────────────────────────────────────────────────────
-def init_reminders(conn):
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS reminders (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER,
-        remind_at DATETIME,
-        text TEXT,
-        sent INTEGER DEFAULT 0
-    )''')
-    conn.commit()
-
-def save_reminder(user_id, remind_at, text):
-    conn = sqlite3.connect('memory.db')
-    init_reminders(conn)
-    c = conn.cursor()
-    c.execute('INSERT INTO reminders (user_id, remind_at, text) VALUES (?, ?, ?)',
-              (user_id, remind_at.isoformat(), text))
-    rid = c.lastrowid
-    conn.commit()
-    conn.close()
-    return rid
-
-def make_ics(title, remind_at):
-    uid = str(uuid.uuid4())
-    dt = remind_at.strftime('%Y%m%dT%H%M%SZ')
-    lines = [
-        'BEGIN:VCALENDAR',
-        'VERSION:2.0',
-        'PRODID:-//BX Assistant//EN',
-        'BEGIN:VEVENT',
-        'UID:' + uid,
-        'DTSTAMP:' + dt,
-        'DTSTART:' + dt,
-        'SUMMARY:' + title.replace(',', '\,'),
-        'DESCRIPTION:' + title.replace(',', '\,'),
-        'END:VEVENT',
-        'END:VCALENDAR',
-    ]
-    return chr(10).join(lines)
-
-async def parse_reminder(text, lang='ru'):
-    """Use Claude to extract remind_at datetime and reminder text from natural language."""
-    now = datetime.now(timezone.utc)
-    prompt = (
-        'Extract reminder info from this message. Return JSON only, no explanation.\n'
-        'Format: {"dt": "YYYY-MM-DDTHH:MM:SS", "text": "reminder text"}\n'
-        'Current UTC time: ' + now.isoformat() + '\n'
-        'User timezone offset: +3 (Moscow) unless stated otherwise.\n'
-        'Message: ' + text
-    )
-    try:
-        resp = client.messages.create(
-            model='claude-haiku-4-5-20251001', max_tokens=100,
-            messages=[{'role': 'user', 'content': prompt}]
-        )
-        import json
-        data = json.loads(resp.content[0].text.strip())
-        dt = datetime.fromisoformat(data['dt'])
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt, data.get('text', text)
-    except Exception:
-        return None, None
-
-async def check_reminders(context):
-    """Job: fires pending reminders."""
-    now = datetime.now(timezone.utc)
-    conn = sqlite3.connect('memory.db')
-    init_reminders(conn)
-    c = conn.cursor()
-    c.execute(
-        'SELECT id, user_id, text FROM reminders WHERE sent=0 AND datetime(remind_at) <= datetime(?)',
-        (now.isoformat(),)
-    )
-    due = c.fetchall()
-    for rid, user_id, text in due:
-        lang = get_lang(user_id)
-        try:
-            await context.bot.send_message(
-                chat_id=user_id,
-                text=t(lang, 'remind_text', text=text)
-            )
-        except Exception as e:
-            pass
-        c.execute('UPDATE reminders SET sent=1 WHERE id=?', (rid,))
-    conn.commit()
-    conn.close()
-async def check_expiring_subscriptions(context: ContextTypes.DEFAULT_TYPE):
-    conn = sqlite3.connect('memory.db')
-    c = conn.cursor()
-    now = datetime.now(timezone.utc)
-    in_3_days = now + timedelta(days=3)
-    c.execute("""
-        SELECT user_id FROM users
-        WHERE status = 'active'
-        AND expires_at IS NOT NULL
-        AND datetime(expires_at) BETWEEN datetime(?) AND datetime(?)
-    """, (now.isoformat(), in_3_days.isoformat()))
-    expiring_soon = c.fetchall()
-    yesterday = now - timedelta(days=1)
-    c.execute("""
-        SELECT user_id FROM users
-        WHERE status = 'active'
-        AND expires_at IS NOT NULL
-        AND datetime(expires_at) < datetime(?)
-        AND datetime(expires_at) > datetime(?)
-    """, (now.isoformat(), yesterday.isoformat()))
-    just_expired = c.fetchall()
-    conn.close()
-
-    for (user_id,) in expiring_soon:
-        if user_id in ADMIN_IDS:
-            continue
-        lang = get_lang(user_id)
-        try:
-            await context.bot.send_message(chat_id=user_id, text=t(lang, 'notify_expiring'))
-        except Exception as e:
-            logger.error(f"Notify error {user_id}: {e}")
-
-    for (user_id,) in just_expired:
-        if user_id in ADMIN_IDS:
-            continue
-        lang = get_lang(user_id)
-        try:
-            await context.bot.send_message(chat_id=user_id, text=t(lang, 'notify_expired', price=STARS_PRICE))
-            conn2 = sqlite3.connect('memory.db')
-            c2 = conn2.cursor()
-            c2.execute("UPDATE users SET status='trial' WHERE user_id=?", (user_id,))
-            conn2.commit()
-            conn2.close()
-        except Exception as e:
-            logger.error(f"Expired notify error {user_id}: {e}")
-
-async def send_subscribe_invoice(update: Update, lang: str = 'ru'):
-    await update.message.reply_invoice(
-        title=t(lang, 'sub_title'),
-        description=t(lang, 'sub_desc'),
-        payload="subscribe_30",
-        currency="XTR",
-        prices=[LabeledPrice(t(lang, 'sub_label'), STARS_PRICE)],
-    )
-
-GIF_FILE_ID = None
-GIF_PATH = "/root/tg_bot/bx_logo.mp4"
-
-async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global GIF_FILE_ID
-    user_id = update.effective_user.id
-    username = update.effective_user.username or ""
-    if user_id not in ADMIN_IDS:
-        row = get_user_status(user_id)
-        if not row and get_total_users() >= MAX_USERS:
-            lang = 'ru'
-            await update.message.reply_text(t(lang, 'start_closed'))
-            return
-    register_user(user_id, username)
-    lang = get_lang(user_id)
-    if user_id in ADMIN_IDS:
-        caption = t(lang, 'start_admin')
-    else:
-        caption = t(lang, 'start_user', days=TRIAL_DAYS, price=STARS_PRICE)
-    # Trigger onboarding for new users
-    if user_id not in ADMIN_IDS and not is_onboarded(user_id):
-        context.user_data['onb_step'] = 0
-    try:
-        reply_markup = make_keyboard(lang)
-        if GIF_FILE_ID:
-            msg = await update.message.reply_animation(animation=GIF_FILE_ID, caption=caption, reply_markup=reply_markup)
-        else:
-            with open(GIF_PATH, "rb") as gif_f:
-                msg = await update.message.reply_animation(animation=gif_f, caption=caption, reply_markup=reply_markup)
-            if msg.animation:
-                GIF_FILE_ID = msg.animation.file_id
-                logger.info(f"GIF file_id cached: {GIF_FILE_ID}")
-    except Exception as e:
-        logger.error(f"GIF send error: {e}")
-        await update.message.reply_text(caption, reply_markup=make_keyboard(lang))
-    if user_id not in ADMIN_IDS and not is_onboarded(user_id):
-        await send_onboarding_step(update.message, context, 0, lang)
-
-async def cmd_subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    lang = get_lang(user_id)
-    if user_id in ADMIN_IDS:
-        await update.message.reply_text(t(lang, 'sub_admin'))
-        return
-    register_user(user_id, update.effective_user.username or "")
-    await send_subscribe_invoice(update, lang)
-
-async def pre_checkout(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.pre_checkout_query.answer(ok=True)
-
-async def successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    lang = get_lang(user_id)
-    expires = activate_subscription(user_id)
-    exp_str = expires.strftime("%d.%m.%Y")
-    await update.message.reply_text(t(lang, 'payment_ok', date=exp_str))
-
-async def check_access(update: Update) -> bool:
-    user_id = update.effective_user.id
-    lang = get_lang(user_id)
-    allowed, reason = is_allowed(user_id)
-    if allowed:
+    t = text.lower()
+    if any(w in t for w in keywords):
         return True
-    if reason == "not_registered":
-        await update.message.reply_text(t(lang, 'access_not_registered'))
-    elif reason == "expired":
-        await update.message.reply_text(t(lang, 'access_expired', price=STARS_PRICE))
-        await send_subscribe_invoice(update, lang)
-    elif reason == "blocked":
-        await update.message.reply_text(t(lang, 'access_blocked'))
+    if len(text.split()) >= 5:
+        try:
+            resp = ai.messages.create(
+                model="claude-haiku-4-5-20251001", max_tokens=5,
+                messages=[{"role": "user", "content": f"Нужен ли веб-поиск для ответа? Только 'да' или 'нет': {text}"}]
+            )
+            return resp.content[0].text.strip().lower().startswith("да")
+        except Exception:
+            return False
     return False
 
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await check_access(update):
-        return
-    user_id = update.effective_user.id
-    lang = get_lang(user_id)
-    user_text = update.message.text
-
-    if is_rate_limited(user_id):
-        lang = get_lang(user_id)
-        msg = 'Полегче! Не более 10 сообщений в минуту.' if lang == 'ru' else 'Slow down! Max 10 messages per minute.'
-        await update.message.reply_text(msg)
-        return
-    if context.user_data.get('waiting_topic_name'):
-        del context.user_data['waiting_topic_name']
-        tid = create_topic(user_id, user_text)
-        set_active_topic(context, tid, user_text)
-        await update.message.reply_text(t(lang, 'topics_created', name=user_text), parse_mode="Markdown")
-        return
-
-    # Handle topic goal input
-    if context.user_data.get('topic_awaiting_goal'):
-        del context.user_data['topic_awaiting_goal']
-        active_id, active_name = get_active_topic(context)
-        if active_id:
-            # Save goal as first message in topic and respond
-            save_topic_message(user_id, active_id, "user", user_text)
-            goal_system = get_system(user_id) + f"\n\nАктивная тема: {active_name}. Цель пользователя: {user_text}. Сфокусируйся на этой задаче."
-            response = client.messages.create(
-                model="claude-sonnet-4-6", max_tokens=1000,
-                system=goal_system,
-                messages=[{"role": "user", "content": user_text}])
-            reply = response.content[0].text
-            save_topic_message(user_id, active_id, "assistant", reply)
-            await update.message.reply_text(f"[{active_name}] {reply}")
-        return
-
-    # Keyboard buttons — check both languages
-    btn_image_vals = {STRINGS['ru']['btn_image'], STRINGS['en']['btn_image']}
-    btn_video_vals = {STRINGS['ru']['btn_video'], STRINGS['en']['btn_video']}
-    btn_topics_vals = {STRINGS['ru']['btn_topics'], STRINGS['en']['btn_topics']}
-    btn_sub_vals = {STRINGS['ru']['btn_sub'], STRINGS['en']['btn_sub']}
-    btn_help_vals = {STRINGS['ru']['btn_help'], STRINGS['en']['btn_help']}
-
-    if user_text in btn_topics_vals:
-        await cmd_topics(update, context)
-        return
-    if user_text in btn_image_vals:
-        await cmd_image(update, context)
-        return
-    if user_text in btn_video_vals:
-        await cmd_video_gen(update, context)
-        return
-    if user_text in btn_sub_vals:
-        await cmd_subscribe(update, context)
-        return
-    if user_text in btn_help_vals:
-        await update.message.reply_text(t(lang, 'help_text'))
-        return
-    btn_lang_vals = {STRINGS['ru']['btn_lang'], STRINGS['en']['btn_lang']}
-    if user_text in btn_lang_vals:
-        await cmd_language(update, context)
-        return
-
+def web_search(query):
     try:
-        remember_kw = STRINGS[lang].get('remember_keywords', STRINGS['ru']['remember_keywords'])
-        if any(word in user_text.lower() for word in remember_kw):
-            prefs = get_prefs(user_id)
-            new_prefs = prefs + '\n' + user_text if prefs else user_text
-            save_prefs(user_id, new_prefs)
-            await update.message.reply_text(t(lang, 'remembered'))
+        result = tavily.search(query=query, max_results=3)
+        return "\n\n".join([r["content"] for r in result["results"][:3]])
+    except Exception as e:
+        logger.error(f"Search: {e}")
+        return ""
+
+# ── System prompt ─────────────────────────────────────────────────────────────
+def get_system(user_id, topic=None):
+    today = date.today().strftime("%d %B %Y")
+    prefs = get_prefs(user_id)
+    summary = get_summary(user_id)
+    notes = get_topic_notes(user_id, topic) if topic and topic != "общее" else ""
+
+    sys = (
+        f"Ты личный ассистент. Сегодня: {today}.\n"
+        f"Отвечай на ЛЮБОЙ вопрос пользователя — нет запрещённых тем.\n"
+        f"Ты можешь: анализировать фото/PDF когда они приложены, создавать напоминания (.ics).\n"
+        f"Команды бота: /image (генерация фото), /video (генерация видео), /topics (темы), /reset (очистить историю).\n"
+        f"Если просят сгенерировать фото или видео — направляй на /image или /video.\n"
+        f"ВАЖНО: НЕ пиши что пользователь отправил фото, если ты его не видишь в текущем сообщении.\n"
+        f"НЕ проси пользователя повторно прикреплять фото если он тебя ни о чём таком не просил.\n"
+        f"НИКОГДА не пиши 'user:' или 'assistant:' в своём ответе. Не имитируй продолжение диалога.\n"
+        f"Отвечай кратко и по делу."
+    )
+    if topic and topic != "общее":
+        sys += f"\n\nТекущая тема: [{topic.upper()}]. История ведётся отдельно по этой теме."
+    if notes:
+        sys += f"\n\nЗаметки по теме:\n{notes}"
+    if summary:
+        sys += f"\n\nКраткое резюме прошлых разговоров:\n{summary}"
+    if prefs:
+        sys += f"\n\nПредпочтения пользователя:\n{prefs}"
+
+    return [{"type": "text", "text": sys, "cache_control": {"type": "ephemeral"}}]
+
+async def update_summary(user_id):
+    cnt = get_message_count(user_id)
+    if cnt > 0 and cnt % 30 == 0:
+        history = get_history(user_id)
+        old = get_summary(user_id)
+        try:
+            resp = ai.messages.create(
+                model="claude-haiku-4-5-20251001", max_tokens=300,
+                messages=[{"role": "user", "content": (
+                    f"Сделай краткое резюме диалога (3-5 предложений).\nПредыдущее: {old}\n\n"
+                    + "\n".join([f"{m['role']}: {m['content'][:200]}" for m in history])
+                )}]
+            )
+            save_summary(user_id, resp.content[0].text)
+        except Exception:
+            pass
+
+# ══════════════════════════════════════════════════════════════════════════════
+# WAVESPEED
+# ══════════════════════════════════════════════════════════════════════════════
+WS_HEADERS = {"Authorization": f"Bearer {WAVESPEED_KEY}", "Content-Type": "application/json"}
+
+def ws_poll(request_id, timeout=120):
+    url = f"https://api.wavespeed.ai/api/v3/predictions/{request_id}/result"
+    for _ in range(timeout // 3):
+        time.sleep(3)
+        try:
+            resp = requests.get(url, headers=WS_HEADERS, timeout=10)
+            if resp.status_code == 200:
+                data = resp.json().get("data", {})
+                status = data.get("status")
+                if status == "completed":
+                    outputs = data.get("outputs", [])
+                    return outputs[0] if outputs else None
+                elif status == "failed":
+                    logger.error(f"WS failed: {data}")
+                    return None
+        except Exception as e:
+            logger.error(f"ws_poll: {e}")
+    return None
+
+def generate_image_ws(prompt):
+    resp = requests.post(
+        "https://api.wavespeed.ai/api/v3/google/nano-banana-2/text-to-image",
+        headers=WS_HEADERS,
+        json={"prompt": prompt, "size": "2048*2048", "num_images": 1},
+        timeout=15
+    )
+    if resp.status_code != 200:
+        logger.error(f"Image t2i error: {resp.text}")
+        return None
+    rid = resp.json().get("data", {}).get("id")
+    return ws_poll(rid, timeout=90) if rid else None
+
+def generate_image_edit_ws(image_url, prompt):
+    resp = requests.post(
+        "https://api.wavespeed.ai/api/v3/google/nano-banana-2/edit",
+        headers=WS_HEADERS,
+        json={"image": image_url, "prompt": prompt, "size": "2048*2048"},
+        timeout=15
+    )
+    if resp.status_code != 200:
+        logger.error(f"Image edit error: {resp.text}")
+        return None
+    rid = resp.json().get("data", {}).get("id")
+    return ws_poll(rid, timeout=90) if rid else None
+
+def generate_video_from_text_ws(prompt):
+    resp = requests.post(
+        "https://api.wavespeed.ai/api/v3/bytedance/seedance-2.0-mini/text-to-video",
+        headers=WS_HEADERS,
+        json={"prompt": prompt, "duration": 5, "resolution": "480p"},
+        timeout=15
+    )
+    if resp.status_code != 200:
+        logger.error(f"T2V error: {resp.text}")
+        return None
+    rid = resp.json().get("data", {}).get("id")
+    return ws_poll(rid, timeout=120) if rid else None
+
+def generate_video_ws(image_url, prompt=""):
+    resp = requests.post(
+        "https://api.wavespeed.ai/api/v3/bytedance/seedance-2.0-mini/image-to-video",
+        headers=WS_HEADERS,
+        json={
+            "image": image_url,
+            "prompt": prompt or "cinematic smooth motion",
+            "duration": 5,
+            "resolution": "480p",
+        },
+        timeout=15
+    )
+    if resp.status_code != 200:
+        logger.error(f"I2V error: {resp.text}")
+        return None
+    rid = resp.json().get("data", {}).get("id")
+    return ws_poll(rid, timeout=120) if rid else None
+
+async def upload_to_tmpfiles(context, photo_obj):
+    file = await context.bot.get_file(photo_obj.file_id)
+    file_bytes = await file.download_as_bytearray()
+    upload = requests.post(
+        "https://tmpfiles.org/api/v1/upload",
+        files={"file": ("photo.jpg", bytes(file_bytes), "image/jpeg")},
+        timeout=15
+    )
+    if upload.status_code != 200:
+        return None
+    page_url = upload.json().get("data", {}).get("url", "")
+    return page_url.replace("tmpfiles.org/", "tmpfiles.org/dl/")
+
+async def upload_file_id_to_tmpfiles(context, file_id):
+    file = await context.bot.get_file(file_id)
+    file_bytes = await file.download_as_bytearray()
+    upload = requests.post(
+        "https://tmpfiles.org/api/v1/upload",
+        files={"file": ("photo.jpg", bytes(file_bytes), "image/jpeg")},
+        timeout=15
+    )
+    if upload.status_code != 200:
+        return None
+    page_url = upload.json().get("data", {}).get("url", "")
+    return page_url.replace("tmpfiles.org/", "tmpfiles.org/dl/")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ACCESS GATE
+# ══════════════════════════════════════════════════════════════════════════════
+async def check_access(update, field="messages") -> bool:
+    user_id = update.effective_user.id
+    name = update.effective_user.full_name or ""
+    username = f"@{update.effective_user.username}" if update.effective_user.username else ""
+    ensure_user(user_id, name, username)
+    tier = get_tier(user_id)
+    if tier == TIER_BLOCKED:
+        await update.message.reply_text("❌ Доступ закрыт.")
+        return False
+    if not check_limit(user_id, field):
+        limit = TIER_LIMITS[tier][{"messages": 0, "images": 1, "videos": 2}[field]]
+        await update.message.reply_text(
+            f"⚠️ Лимит исчерпан ({limit} {field}/день). Обновится в полночь."
+        )
+        return False
+    inc_usage(user_id, field)
+    return True
+
+# ══════════════════════════════════════════════════════════════════════════════
+# COMMANDS
+# ══════════════════════════════════════════════════════════════════════════════
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    name = update.effective_user.full_name or "Пользователь"
+    username = f"@{update.effective_user.username}" if update.effective_user.username else ""
+    is_new = ensure_user(user_id, name, username)
+    await update.message.reply_text(".", reply_markup=ReplyKeyboardRemove())
+    await update.message.reply_text(
+        f"Привет, {name}! Я BX Assistant 🤖\n\n"
+        f"Умею:\n"
+        f"• Отвечать на вопросы и искать актуальную инфу\n"
+        f"• Слушать голосовые\n"
+        f"• Анализировать фото и PDF\n"
+        f"• Ставить напоминания → iPhone Calendar\n"
+        f"• Генерировать фото /image и видео /video\n"
+        f"• Вести темы раздельно /topics\n"
+        f"• Очистить историю /reset\n\n"
+        f"{tier_info_text(user_id)}"
+    )
+    if is_new and user_id not in (OWNER_ID, VIP_ID):
+        conn = sqlite3.connect("memory.db")
+        total = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+        conn.close()
+        try:
+            await context.bot.send_message(
+                chat_id=OWNER_ID,
+                text=f"🆕 Новый: {name} {username} ({user_id})\nВсего: {total}"
+            )
+        except Exception:
+            pass
+
+async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    topic = get_user_topic(user_id)
+    # Сбрасываем все состояния
+    context.user_data.clear()
+    if topic:
+        clear_history(user_id, topic)
+        await update.message.reply_text(f"🗑 История темы [{topic.upper()}] очищена. Начнём заново!")
+    else:
+        clear_history(user_id)
+        await update.message.reply_text("🗑 История очищена. Начнём заново!")
+
+async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(tier_info_text(update.effective_user.id))
+
+async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if get_tier(user_id) not in (TIER_OWNER, TIER_VIP):
+        return
+    args = context.args or []
+    if not args or args[0] == "list":
+        conn = sqlite3.connect("memory.db")
+        rows = conn.execute("SELECT user_id, tier, name, username FROM users ORDER BY tier").fetchall()
+        conn.close()
+        lines = ["👥 Пользователи:"]
+        for uid, t, n, un in rows:
+            usage = get_usage(uid)
+            lines.append(f"  {TIER_NAMES.get(t, t)}: {n} {un} ({uid}) — {usage[0]} msg")
+        await update.message.reply_text("\n".join(lines) or "Пусто")
+    elif args[0] == "set" and len(args) >= 3:
+        try:
+            target = int(args[1])
+            new_tier = args[2].lower()
+            if new_tier not in TIER_LIMITS:
+                await update.message.reply_text(f"Тиры: {', '.join(TIER_LIMITS)}")
+                return
+            set_tier(target, new_tier)
+            await update.message.reply_text(f"✅ {target} → {TIER_NAMES[new_tier]}")
+        except ValueError:
+            await update.message.reply_text("Неверный ID")
+    else:
+        await update.message.reply_text(
+            "/admin list\n/admin set <id> <tier>\nТиры: owner vip subscriber beta blocked"
+        )
+
+async def cmd_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if get_tier(user_id) == TIER_BLOCKED:
+        await update.message.reply_text("❌ Доступ закрыт.")
+        return
+    if not check_limit(user_id, "images"):
+        tier = get_tier(user_id)
+        limit = TIER_LIMITS[tier][1]
+        await update.message.reply_text(f"⚠️ Лимит фото исчерпан ({limit}/день). Обновится в полночь.")
+        return
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📝 Текст → Фото", callback_data="media:img_t2i")],
+        [InlineKeyboardButton("🖼 Фото → Фото (редактирование)", callback_data="media:img_i2i")],
+    ])
+    await update.message.reply_text("🎨 Выбери режим:", reply_markup=keyboard)
+
+async def cmd_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if get_tier(user_id) == TIER_BLOCKED:
+        await update.message.reply_text("❌ Доступ закрыт.")
+        return
+    if not check_limit(user_id, "videos"):
+        tier = get_tier(user_id)
+        limit = TIER_LIMITS[tier][2]
+        await update.message.reply_text(f"⚠️ Лимит видео исчерпан ({limit}/день). Обновится в полночь.")
+        return
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📝 Текст → Видео", callback_data="media:vid_t2v")],
+        [InlineKeyboardButton("🎬 Фото → Видео", callback_data="media:vid_i2v")],
+    ])
+    await update.message.reply_text("🎬 Выбери режим:", reply_markup=keyboard)
+
+async def cmd_topics(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    topics = get_user_topics(user_id)
+    current = get_user_topic(user_id) or "авто"
+    keyboard = []
+    for name in topics:
+        marker = "✅ " if name == current else ""
+        keyboard.append([InlineKeyboardButton(f"{marker}{name.upper()}", callback_data=f"topic:{name}")])
+    keyboard.append([InlineKeyboardButton("🔄 Авто-определение", callback_data="topic:auto")])
+    keyboard.append([InlineKeyboardButton("➕ Новая тема", callback_data="topic:new")])
+    await update.message.reply_text(
+        f"Темы (активна: *{current}*)\nКаждая тема — отдельная история:",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown"
+    )
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CALLBACKS
+# ══════════════════════════════════════════════════════════════════════════════
+async def topics_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user_id = query.from_user.id
+    await query.answer()
+    data = query.data
+    if data == "topic:auto":
+        set_user_topic(user_id, None)
+        await query.edit_message_text("🔄 Тема определяется автоматически.")
+    elif data == "topic:new":
+        context.user_data["waiting_new_topic"] = True
+        await query.edit_message_text(
+            "Напиши название темы (и описание через запятую):\n_работа с клиентом, задачи по проекту_",
+            parse_mode="Markdown"
+        )
+    elif data.startswith("topic:"):
+        topic = data.split(":", 1)[1]
+        set_user_topic(user_id, topic)
+        notes = get_topic_notes(user_id, topic)
+        notes_text = f"\n\n📝 Заметки:\n{notes}" if notes else ""
+        await query.edit_message_text(
+            f"✅ Тема: *{topic.upper()}*{notes_text}\n\nИстория этой темы загружена.",
+            parse_mode="Markdown"
+        )
+
+async def media_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+
+    if data == "media:img_t2i":
+        context.user_data["media_mode"] = "img_t2i"
+        await query.edit_message_text("📝 Напиши промпт для картинки:")
+
+    elif data == "media:img_i2i":
+        context.user_data["media_mode"] = "img_i2i"
+        await query.edit_message_text(
+            "🖼 Напиши что изменить, потом пришли фото.\n"
+            "Или сначала пришли фото — спрошу промпт."
+        )
+
+    elif data == "media:vid_t2v":
+        context.user_data["media_mode"] = "vid_t2v"
+        await query.edit_message_text("📝 Напиши промпт для видео:")
+
+    elif data == "media:vid_i2v":
+        context.user_data["media_mode"] = "vid_i2v"
+        await query.edit_message_text(
+            "🎬 Пришли фото. Можно сначала написать промпт — или сразу фото."
+        )
+
+# ══════════════════════════════════════════════════════════════════════════════
+# HANDLERS
+# ══════════════════════════════════════════════════════════════════════════════
+async def handle_new_topic_input(update, context) -> bool:
+    if not context.user_data.get("waiting_new_topic"):
+        return False
+    user_id = update.effective_user.id
+    text = update.message.text
+    parts = [p.strip() for p in text.split(",", 1)]
+    name = parts[0].lower()
+    description = parts[1] if len(parts) > 1 else ""
+    add_user_topic(user_id, name, description)
+    set_user_topic(user_id, name)
+    context.user_data.pop("waiting_new_topic", None)
+    await update.message.reply_text(
+        f"✅ Тема *{name.upper()}* создана!\nВеду историю отдельно.",
+        parse_mode="Markdown"
+    )
+    return True
+
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user_text = update.message.text
+    try:
+        if await handle_new_topic_input(update, context):
             return
 
-        # Reminder detection
-        remind_kw = ['напомни', 'напоминай', 'поставь напоминание', 'remind me', 'set a reminder', 'set reminder']
-        if any(kw in user_text.lower() for kw in remind_kw):
-            await update.message.reply_chat_action(ChatAction.TYPING)
-            remind_dt, remind_text = await parse_reminder(user_text, lang)
-            if remind_dt and remind_dt > datetime.now(timezone.utc):
-                save_reminder(user_id, remind_dt, remind_text)
-                # Schedule job
-                context.application.job_queue.run_once(
-                    check_reminders,
-                    when=remind_dt,
-                    name='reminder_' + str(user_id)
-                )
-                dt_str = remind_dt.strftime('%d.%m %H:%M')
-                await update.message.reply_text(t(lang, 'remind_set', dt=dt_str))
-                # Send .ics file
-                ics_content = make_ics(remind_text, remind_dt)
-                ics_bytes = ics_content.encode('utf-8')
-                import io
-                await update.message.reply_document(
-                    document=io.BytesIO(ics_bytes),
-                    filename='reminder.ics',
-                    caption=t(lang, 'remind_ics')
+        # ── Старые кнопки ReplyKeyboard (от прошлой версии бота) ──────────
+        OLD_BTN_MAP = {
+            "🎨 генерация фото": cmd_image,
+            "🎬 генерация видео": cmd_video,
+            "📚 темы": cmd_topics,
+            "💎 подписка": cmd_status,
+            "❓ помощь": cmd_status,
+        }
+        tl_btn = user_text.lower().strip()
+        for btn_text, handler in OLD_BTN_MAP.items():
+            if tl_btn == btn_text:
+                await handler(update, context)
+                return
+
+        # ── Состояния "ждём промпт к фото/видео (photo-first)" ────────────
+        if context.user_data.get("waiting_img_edit_photo_first"):
+            file_id = context.user_data.get("waiting_img_edit_photo_first")
+            prompt = user_text if user_text.lower() != "без промпта" else "improve this image"
+            if not check_limit(user_id, "images"):
+                context.user_data.pop("waiting_img_edit_photo_first", None)
+                await update.message.reply_text("⚠️ Лимит фото исчерпан.")
+                return
+            await update.message.reply_text("🎨 Редактирую...")
+            direct_url = await upload_file_id_to_tmpfiles(context, file_id)
+            if not direct_url:
+                context.user_data.pop("waiting_img_edit_photo_first", None)
+                await update.message.reply_text("❌ Не удалось загрузить фото. Пришли снова.")
+                return
+            url = generate_image_edit_ws(direct_url, prompt)
+            if url:
+                context.user_data.pop("waiting_img_edit_photo_first", None)
+                inc_usage(user_id, "images")
+                await context.bot.send_photo(chat_id=update.effective_chat.id, photo=url,
+                                              caption=f"✅ Промпт: {prompt[:80]}")
+            else:
+                # Не очищаем стейт — пусть пользователь попробует другой промпт
+                await update.message.reply_text("❌ Не удалось. Попробуй изменить промпт:")
+            return
+
+        if context.user_data.get("waiting_video_photo_first"):
+            file_id = context.user_data.get("waiting_video_photo_first")
+            prompt = "" if user_text.lower() == "без промпта" else user_text
+            if not check_limit(user_id, "videos"):
+                context.user_data.pop("waiting_video_photo_first", None)
+                await update.message.reply_text("⚠️ Лимит видео исчерпан.")
+                return
+            await update.message.reply_text("🎬 Генерирую видео (30-60 сек)...")
+            direct_url = await upload_file_id_to_tmpfiles(context, file_id)
+            if not direct_url:
+                context.user_data.pop("waiting_video_photo_first", None)
+                await update.message.reply_text("❌ Не удалось загрузить фото. Пришли снова.")
+                return
+            url = generate_video_ws(direct_url, prompt)
+            if url:
+                context.user_data.pop("waiting_video_photo_first", None)
+                inc_usage(user_id, "videos")
+                await context.bot.send_video(
+                    chat_id=update.effective_chat.id, video=url,
+                    caption="✅ Готово!" + (f" Промпт: {prompt}" if prompt else "")
                 )
             else:
-                await update.message.reply_text(t(lang, 'remind_no_time'))
+                # Сохраняем фото, меняем только промпт
+                await update.message.reply_text("❌ Не удалось. Попробуй другой промпт:")
             return
-        await update.message.reply_chat_action(ChatAction.TYPING)
-        search_context = ""
-        if needs_search(user_text, lang):
-            await update.message.reply_text(t(lang, 'searching'))
-            search_context = web_search(user_text)
 
-        active_id, active_name = get_active_topic(context)
-        if active_id:
-            save_topic_message(user_id, active_id, "user", user_text)
-            history = get_topic_history(user_id, active_id)
-            if search_context:
-                history[-1]["content"] += f"\n\n[Search results]:\n{search_context}"
-            topic_system = get_system(user_id) + f"\n\nActive topic: {active_name}."
-            response = client.messages.create(
-                model="claude-sonnet-4-6", max_tokens=1000,
-                system=topic_system, messages=history)
-            reply = response.content[0].text
-            save_topic_message(user_id, active_id, "assistant", reply)
-            await update.message.reply_text(f"[{active_name}] {reply}")
-        else:
-            save_message(user_id, "user", user_text)
-            await update_summary(user_id)
-            history = get_history(user_id)
-            if search_context:
-                history[-1]["content"] += f"\n\n[Search results]:\n{search_context}"
-            response = client.messages.create(
-                model="claude-sonnet-4-6", max_tokens=1000,
-                system=get_system(user_id), messages=history)
-            reply = response.content[0].text
-            save_message(user_id, "assistant", reply)
-            await update.message.reply_text(reply)
-            # Auto-detect topic suggestion every 6 messages
-            msg_count = get_message_count(user_id)
-            if msg_count > 0 and msg_count % 6 == 0:
-                try:
-                    recent = get_history(user_id)[-6:]
-                    detect_prompt = t(lang, 'topics_detect_prompt')
-                    det_resp = client.messages.create(
-                        model="claude-haiku-4-5-20251001", max_tokens=30,
-                        messages=[{"role": "user", "content": detect_prompt + "\n\n" + "\n".join([f"{m['role']}: {m['content'][:100]}" for m in recent])}])
-                    detected_name = det_resp.content[0].text.strip()[:40]
-                    if detected_name and len(detected_name) > 2:
-                        keyboard = InlineKeyboardMarkup([[
-                            InlineKeyboardButton(t(lang, 'topics_save_btn'), callback_data=f"topic_autosave_{detected_name}")
-                        ]])
-                        await update.message.reply_text(
-                            f"{t(lang, 'topics_save_as')} *{detected_name}*",
-                            parse_mode="Markdown",
-                            reply_markup=keyboard
-                        )
-                except Exception:
-                    pass
+        # ── Медиа-режим: ждём промпт ──────────────────────────────────────
+        mode = context.user_data.get("media_mode")
+
+        if mode == "img_t2i":
+            if not check_limit(user_id, "images"):
+                context.user_data.pop("media_mode", None)
+                await update.message.reply_text("⚠️ Лимит фото исчерпан.")
+                return
+            await update.message.reply_text("🎨 Генерирую...")
+            url = generate_image_ws(user_text)
+            if url:
+                context.user_data.pop("media_mode", None)
+                inc_usage(user_id, "images")
+                await context.bot.send_photo(chat_id=update.effective_chat.id, photo=url,
+                                              caption=f"✅ Промпт: {user_text[:80]}")
+            else:
+                # Оставляем mode=img_t2i, пусть попробует снова
+                await update.message.reply_text("❌ Не удалось. Напиши промпт ещё раз:")
+            return
+
+        elif mode == "img_i2i":
+            context.user_data["img_edit_prompt"] = user_text
+            context.user_data["waiting_img_edit"] = True
+            context.user_data.pop("media_mode", None)
+            await update.message.reply_text(f"✅ Промпт: «{user_text}»\nТеперь пришли фото.")
+            return
+
+        elif mode == "vid_t2v":
+            if not check_limit(user_id, "videos"):
+                context.user_data.pop("media_mode", None)
+                await update.message.reply_text("⚠️ Лимит видео исчерпан.")
+                return
+            await update.message.reply_text("🎬 Генерирую видео (30-60 сек)...")
+            url = generate_video_from_text_ws(user_text)
+            if url:
+                context.user_data.pop("media_mode", None)
+                inc_usage(user_id, "videos")
+                await context.bot.send_video(chat_id=update.effective_chat.id, video=url,
+                                              caption=f"✅ Промпт: {user_text[:80]}")
+            else:
+                await update.message.reply_text("❌ Не удалось. Напиши промпт ещё раз:")
+            return
+
+        elif mode == "vid_i2v":
+            context.user_data["video_prompt"] = user_text
+            context.user_data["waiting_video"] = True
+            context.user_data.pop("media_mode", None)
+            await update.message.reply_text(f"✅ Промпт: «{user_text}»\nТеперь пришли фото.")
+            return
+
+        # ── Перехват запросов на генерацию ────────────────────────────────
+        tl = user_text.lower()
+        if any(w in tl for w in ["сгенерируй фото", "сгенерируй картинку", "нарисуй",
+                                   "создай фото", "создай картинку", "сделай фото"]):
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("📝 Текст → Фото", callback_data="media:img_t2i")],
+                [InlineKeyboardButton("🖼 Фото → Фото", callback_data="media:img_i2i")],
+            ])
+            await update.message.reply_text("🎨 Выбери режим:", reply_markup=keyboard)
+            return
+        if any(w in tl for w in ["сгенерируй видео", "создай видео", "сделай видео"]):
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("📝 Текст → Видео", callback_data="media:vid_t2v")],
+                [InlineKeyboardButton("🎬 Фото → Видео", callback_data="media:vid_i2v")],
+            ])
+            await update.message.reply_text("🎬 Выбери режим:", reply_markup=keyboard)
+            return
+
+        # ── Обычный чат ───────────────────────────────────────────────────
+        if not await check_access(update, "messages"):
+            return
+
+        # Напоминания
+        if detect_reminder(user_text):
+            dt, title = parse_reminder(user_text)
+            if dt and title:
+                await send_reminder_ics(update, context, title, dt, user_id)
+            else:
+                await update.message.reply_text(
+                    "Не смог разобрать дату.\nПример: напомни 15 июля в 10:00 встреча с клиентом"
+                )
+            return
+
+        # Предпочтения
+        if any(w in tl for w in ["запомни что", "запомни:", "всегда отвечай", "никогда не пиши"]):
+            save_prefs(user_id, (get_prefs(user_id) + "\n" + user_text).strip())
+            await update.message.reply_text("✅ Запомнил!")
+            return
+
+        # Тема
+        pinned = get_user_topic(user_id)
+        topic = pinned if pinned else detect_topic(user_text, user_id)
+
+        # Поиск
+        search_ctx = ""
+        if needs_search(user_text):
+            await update.message.reply_text("🔍 Ищу...")
+            search_ctx = web_search(user_text)
+
+        save_message(user_id, "user", user_text, topic)
+        await update_summary(user_id)
+        history = get_history(user_id, topic)
+        if search_ctx:
+            history[-1]["content"] += f"\n\n[Поиск]:\n{search_ctx}"
+
+        resp = ai.messages.create(
+            model="claude-sonnet-4-6", max_tokens=1200,
+            stop_sequences=["user:", "\nuser:", "\nUser:"],
+            system=get_system(user_id, topic), messages=history
+        )
+        reply = resp.content[0].text.strip()
+        save_message(user_id, "assistant", reply, topic)
+        await maybe_update_notes(user_id, topic, history)
+
+        label = f"[{topic.upper()}] " if topic and topic != "общее" else ""
+        await update.message.reply_text(f"{label}{reply}")
+
     except Exception as e:
         logger.error(f"Text error: {e}")
-        await update.message.reply_text(t(lang, 'error_retry'))
+        await update.message.reply_text("⚠️ Ошибка. Попробуй ещё раз или /reset")
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await check_access(update):
-        return
     user_id = update.effective_user.id
-    lang = get_lang(user_id)
     try:
-        await update.message.reply_chat_action(ChatAction.TYPING)
-        await update.message.reply_text(t(lang, 'voice_received'))
-        file = await context.bot.get_file(update.message.voice.file_id)
+        if not await check_access(update, "messages"):
+            return
+        await update.message.reply_text("🎙 Транскрибирую...")
+        voice = update.message.voice
+        file = await context.bot.get_file(voice.file_id)
         path = f"/tmp/voice_{user_id}.ogg"
         await file.download_to_drive(path)
         segments, _ = whisper.transcribe(path, language="ru")
-        text = " ".join([s.text for s in segments])
+        text = " ".join([s.text for s in segments]).strip()
         os.remove(path)
-        if not text.strip():
-            await update.message.reply_text(t(lang, 'voice_no_speech'))
+        if not text:
+            await update.message.reply_text("Не смог распознать.")
             return
-        await update.message.reply_text(t(lang, 'voice_recognized', text=text))
-        save_message(user_id, "user", text)
-        response = client.messages.create(model="claude-sonnet-4-6", max_tokens=1000,
-                                          system=get_system(user_id), messages=get_history(user_id))
-        reply = response.content[0].text
-        save_message(user_id, "assistant", reply)
-        await update.message.reply_text(reply)
-    except Exception as e:
-        logger.error(f"Voice error: {e}")
-        await update.message.reply_text(t(lang, 'voice_error'))
+        await update.message.reply_text(f"📝 Распознал: {text}")
 
-async def extract_video_frames(video_path: str, user_id: int, max_frames: int = 4) -> list:
-    frames = []
-    try:
-        result = subprocess.run(
-            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-             "-of", "default=noprint_wrappers=1:nokey=1", video_path],
-            capture_output=True, text=True
+        if detect_reminder(text):
+            dt, title = parse_reminder(text)
+            if dt and title:
+                await send_reminder_ics(update, context, title, dt, user_id)
+            return
+
+        pinned = get_user_topic(user_id)
+        topic = pinned if pinned else detect_topic(text, user_id)
+        save_message(user_id, "user", text, topic)
+        history = get_history(user_id, topic)
+        resp = ai.messages.create(
+            model="claude-sonnet-4-6", max_tokens=1200,
+            system=get_system(user_id, topic), messages=history
         )
-        duration = float(result.stdout.strip() or "5")
-        interval = max(1, duration / max_frames)
-        for i in range(min(max_frames, int(duration))):
-            t_sec = i * interval
-            frame_path = f"/tmp/frame_{user_id}_{i}.jpg"
-            subprocess.run(
-                ["ffmpeg", "-y", "-ss", str(t_sec), "-i", video_path,
-                 "-vframes", "1", "-q:v", "3", "-vf", "scale=640:-1", frame_path],
-                capture_output=True
-            )
-            if os.path.exists(frame_path):
-                with open(frame_path, "rb") as f:
-                    frames.append(base64.standard_b64encode(f.read()).decode())
-                os.remove(frame_path)
+        reply = resp.content[0].text
+        save_message(user_id, "assistant", reply, topic)
+        label = f"[{topic.upper()}] " if topic and topic != "общее" else ""
+        await update.message.reply_text(f"{label}{reply}")
     except Exception as e:
-        logger.error(f"Frame extraction error: {e}")
-    return frames
-
-async def handle_media_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.animation:
-        await handle_animation(update, context)
-        return
-    if not await check_access(update):
-        return
-    user_id = update.effective_user.id
-    lang = get_lang(user_id)
-    is_circle = update.message.video_note is not None
-    try:
-        if is_circle:
-            await update.message.reply_text(t(lang, 'video_circle_received'))
-        else:
-            await update.message.reply_text(t(lang, 'video_received'))
-        video = update.message.video_note or update.message.video
-        if not video:
-            await update.message.reply_text(t(lang, 'video_unknown'))
-            return
-        file = await context.bot.get_file(video.file_id)
-        video_path = f"/tmp/media_{user_id}.mp4"
-        audio_path = f"/tmp/media_{user_id}.wav"
-        await file.download_to_drive(video_path)
-
-        audio_result = subprocess.run(
-            ["ffmpeg", "-y", "-i", video_path, "-vn", "-ar", "16000", "-ac", "1", audio_path],
-            capture_output=True, text=True)
-        speech_text = ""
-        if audio_result.returncode == 0 and os.path.exists(audio_path):
-            segments, _ = whisper.transcribe(audio_path, language="ru")
-            speech_text = " ".join([s.text for s in segments]).strip()
-            os.remove(audio_path)
-
-        visual_content = []
-        if is_circle:
-            frames = await extract_video_frames(video_path, user_id, max_frames=3)
-            for frame_b64 in frames:
-                visual_content.append({
-                    "type": "image",
-                    "source": {"type": "base64", "media_type": "image/jpeg", "data": frame_b64}
-                })
-
-        os.remove(video_path)
-        caption = update.message.caption or ""
-
-        if is_circle and visual_content:
-            parts = visual_content.copy()
-            prompt = ""
-            if speech_text:
-                prompt += f"Speech in video: {speech_text}\n\n"
-            prompt += caption or t(lang, 'circle_prompt')
-            parts.append({"type": "text", "text": prompt})
-            messages = get_history(user_id) + [{"role": "user", "content": parts}]
-            response = client.messages.create(
-                model="claude-sonnet-4-6", max_tokens=1000,
-                system=get_system(user_id), messages=messages)
-            reply = response.content[0].text
-            save_message(user_id, "user", f"[video note] {speech_text or 'no speech'}")
-            save_message(user_id, "assistant", reply)
-            await update.message.reply_text(reply)
-        elif speech_text:
-            await update.message.reply_text(t(lang, 'voice_recognized', text=speech_text))
-            save_message(user_id, "user", speech_text)
-            response = client.messages.create(model="claude-sonnet-4-6", max_tokens=1000,
-                                              system=get_system(user_id), messages=get_history(user_id))
-            reply = response.content[0].text
-            save_message(user_id, "assistant", reply)
-            await update.message.reply_text(reply)
-        else:
-            await update.message.reply_text(t(lang, 'video_no_speech'))
-    except Exception as e:
-        logger.error(f"Media video error: {e}", exc_info=True)
-        await update.message.reply_text(t(lang, 'video_error'))
+        logger.error(f"Voice: {e}")
+        await update.message.reply_text("⚠️ Ошибка с голосовым.")
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    lang = get_lang(user_id)
     try:
-        await update.message.reply_chat_action(ChatAction.TYPING)
-        await update.message.reply_text(t(lang, 'photo_received'))
+        # ── Ждём фото для img_i2i (промпт уже есть) ───────────────────────
+        if context.user_data.get("waiting_img_edit"):
+            prompt = context.user_data.get("img_edit_prompt", "improve this image")
+            if not check_limit(user_id, "images"):
+                context.user_data.pop("waiting_img_edit", None)
+                context.user_data.pop("img_edit_prompt", None)
+                await update.message.reply_text("⚠️ Лимит фото исчерпан.")
+                return
+            await update.message.reply_text("🎨 Редактирую...")
+            direct_url = await upload_to_tmpfiles(context, update.message.photo[-1])
+            if not direct_url:
+                await update.message.reply_text("❌ Не удалось загрузить фото. Пришли снова.")
+                return
+            url = generate_image_edit_ws(direct_url, prompt)
+            if url:
+                context.user_data.pop("waiting_img_edit", None)
+                context.user_data.pop("img_edit_prompt", None)
+                inc_usage(user_id, "images")
+                await context.bot.send_photo(chat_id=update.effective_chat.id, photo=url,
+                                              caption=f"✅ Промпт: {prompt[:80]}")
+            else:
+                # Оставляем стейт, пусть пришлёт фото снова
+                await update.message.reply_text("❌ Не удалось. Пришли фото ещё раз:")
+            return
+
+        # ── Ждём фото для i2v (промпт уже есть) ──────────────────────────
+        if context.user_data.get("waiting_video"):
+            prompt = context.user_data.get("video_prompt", "")
+            if not check_limit(user_id, "videos"):
+                context.user_data.pop("waiting_video", None)
+                context.user_data.pop("video_prompt", None)
+                await update.message.reply_text("⚠️ Лимит видео исчерпан.")
+                return
+            await update.message.reply_text("🎬 Генерирую видео (30-60 сек)...")
+            direct_url = await upload_to_tmpfiles(context, update.message.photo[-1])
+            if not direct_url:
+                await update.message.reply_text("❌ Не удалось загрузить фото. Пришли снова.")
+                return
+            url = generate_video_ws(direct_url, prompt)
+            if url:
+                context.user_data.pop("waiting_video", None)
+                context.user_data.pop("video_prompt", None)
+                inc_usage(user_id, "videos")
+                await context.bot.send_video(
+                    chat_id=update.effective_chat.id, video=url,
+                    caption="✅ Готово!" + (f" Промпт: {prompt}" if prompt else "")
+                )
+            else:
+                await update.message.reply_text("❌ Не удалось. Пришли фото ещё раз:")
+            return
+
+        # ── img_i2i: фото пришло первым ───────────────────────────────────
+        if context.user_data.get("media_mode") == "img_i2i":
+            context.user_data.pop("media_mode", None)
+            caption_prompt = update.message.caption
+            if caption_prompt:
+                # Есть подпись — используем как промпт, генерим сразу
+                if not check_limit(user_id, "images"):
+                    await update.message.reply_text("⚠️ Лимит фото исчерпан.")
+                    return
+                await update.message.reply_text("🎨 Редактирую...")
+                direct_url = await upload_to_tmpfiles(context, update.message.photo[-1])
+                if not direct_url:
+                    await update.message.reply_text("❌ Не удалось загрузить фото.")
+                    return
+                url = generate_image_edit_ws(direct_url, caption_prompt)
+                if url:
+                    inc_usage(user_id, "images")
+                    await context.bot.send_photo(chat_id=update.effective_chat.id, photo=url,
+                                                  caption=f"✅ Промпт: {caption_prompt[:80]}")
+                else:
+                    # Сохраняем фото для повторной попытки
+                    context.user_data["waiting_img_edit_photo_first"] = update.message.photo[-1].file_id
+                    await update.message.reply_text("❌ Не удалось. Попробуй другой промпт:")
+            else:
+                # Нет подписи — ждём промпт текстом
+                context.user_data["waiting_img_edit_photo_first"] = update.message.photo[-1].file_id
+                await update.message.reply_text("Что сделать с фото? Напиши промпт:")
+            return
+
+        # ── vid_i2v: фото пришло первым, ждём промпт ─────────────────────
+        if context.user_data.get("media_mode") == "vid_i2v":
+            context.user_data.pop("media_mode", None)
+            context.user_data["waiting_video_photo_first"] = update.message.photo[-1].file_id
+            await update.message.reply_text("Опиши движение для видео (или 'без промпта'):")
+            return
+
+        # ── Авто-триггер i2i: фото + запрос генерации в caption ──────────
+        photo_caption = update.message.caption or ""
+        GEN_KEYWORDS = ["сгенерируй", "нарисуй", "создай картинку", "создай фото",
+                        "сделай картинку", "на основе", "в стиле мультяш", "мультяшн"]
+        if any(w in photo_caption.lower() for w in GEN_KEYWORDS):
+            tier = get_tier(user_id)
+            if tier not in (TIER_BETA, TIER_BLOCKED) or TIER_LIMITS[tier][1] > 0:
+                if not check_limit(user_id, "images"):
+                    await update.message.reply_text("⚠️ Лимит фото исчерпан.")
+                    return
+                await update.message.reply_text("🎨 Редактирую на основе фото...")
+                direct_url = await upload_to_tmpfiles(context, update.message.photo[-1])
+                if not direct_url:
+                    await update.message.reply_text("❌ Не удалось загрузить фото.")
+                    return
+                url = generate_image_edit_ws(direct_url, photo_caption)
+                if url:
+                    inc_usage(user_id, "images")
+                    await context.bot.send_photo(chat_id=update.effective_chat.id, photo=url,
+                                                  caption=f"✅ {photo_caption[:80]}")
+                else:
+                    context.user_data["waiting_img_edit_photo_first"] = update.message.photo[-1].file_id
+                    await update.message.reply_text("❌ Не удалось. Попробуй изменить промпт:")
+                return
+
+        # ── Анализ фото через Claude Vision ──────────────────────────────
+        if not await check_access(update, "messages"):
+            return
+        await update.message.reply_text("🔍 Анализирую фото...")
         photo = update.message.photo[-1]
         file = await context.bot.get_file(photo.file_id)
         file_bytes = await file.download_as_bytearray()
-        image_data = base64.standard_b64encode(file_bytes).decode('utf-8')
-        caption = update.message.caption or t(lang, 'photo_caption')
-        messages = get_history(user_id) + [{"role": "user", "content": [
+        image_data = base64.standard_b64encode(file_bytes).decode("utf-8")
+        caption = update.message.caption or "Что на этом фото?"
+        pinned = get_user_topic(user_id)
+        topic = pinned if pinned else detect_topic(caption, user_id)
+        history = get_history(user_id, topic)
+        messages = history + [{"role": "user", "content": [
             {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": image_data}},
-            {"type": "text", "text": caption}]}]
-        response = client.messages.create(model="claude-sonnet-4-6", max_tokens=1500,
-                                          system=get_system(user_id), messages=messages)
-        reply = response.content[0].text
-        save_message(user_id, "user", f"[photo] {caption}")
-        save_message(user_id, "assistant", reply)
+            {"type": "text", "text": caption}
+        ]}]
+        resp = ai.messages.create(model="claude-sonnet-4-6", max_tokens=1200,
+                                   stop_sequences=["user:", "\nuser:", "\nUser:"],
+                                   system=get_system(user_id, topic), messages=messages)
+        reply = resp.content[0].text.strip()
+        # Сохраняем нейтральный текст, не '[фото]' чтобы не путать будущие запросы
+        save_message(user_id, "user", f"пользователь прислал фото: {caption}", topic)
+        save_message(user_id, "assistant", reply, topic)
         await update.message.reply_text(reply)
     except Exception as e:
-        logger.error(f"Photo error: {e}")
-        await update.message.reply_text(t(lang, 'photo_error'))
-
-GEN_KEYWORDS = [
-    'сгенерируй', 'сгенери', 'создай', 'нарисуй', 'generate', 'создайте',
-    'сделай картинку', 'сделай изображение', 'сделай фото', 'арт',
-    'в стиле', 'render', 'draw', 'image of',
-    'создай персонажа', 'сделай персонажа', 'аниме', 'cartoon', 'мультяш'
-]
-
-async def handle_smart_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await check_access(update):
-        return
-    user_id = update.effective_user.id
-    lang = get_lang(user_id)
-    caption = (update.message.caption or "").lower()
-    if any(kw in caption for kw in GEN_KEYWORDS):
-        allowed, reason = can_generate_image(user_id)
-        if not allowed:
-            await update.message.reply_text(t(lang, 'gen_no_sub', price=STARS_PRICE))
-            return
-        await update.message.reply_text(t(lang, 'gen_photo_confirm'))
-        photo = update.message.photo[-1]
-        file = await context.bot.get_file(photo.file_id)
-        file_bytes = await file.download_as_bytearray()
-        img_ref = base64.standard_b64encode(file_bytes).decode()
-        prompt = update.message.caption or "Create a stylized image based on this photo"
-        keyboard = [[
-            InlineKeyboardButton("1:1 📷", callback_data="ratio_1:1"),
-            InlineKeyboardButton("16:9 🖥", callback_data="ratio_16:9"),
-            InlineKeyboardButton("9:16 📱", callback_data="ratio_9:16"),
-        ]]
-        context.user_data["prompt"] = prompt
-        context.user_data["img_ref"] = img_ref
-        await update.message.reply_text(t(lang, 'gen_choose_ratio'), reply_markup=InlineKeyboardMarkup(keyboard))
-        return
-    await handle_photo(update, context)
+        logger.error(f"Photo: {e}")
+        await update.message.reply_text("⚠️ Ошибка с фото.")
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await check_access(update):
-        return
     user_id = update.effective_user.id
-    lang = get_lang(user_id)
     try:
+        if not await check_access(update, "messages"):
+            return
         doc = update.message.document
         caption = update.message.caption or ""
-        if doc.mime_type == 'application/pdf':
-            await update.message.reply_text(t(lang, 'doc_pdf_received'))
+        pinned = get_user_topic(user_id)
+        topic = pinned if pinned else "общее"
+        if doc.mime_type == "application/pdf":
+            await update.message.reply_text("📄 Читаю PDF...")
             file = await context.bot.get_file(doc.file_id)
             file_bytes = await file.download_as_bytearray()
-            pdf_data = base64.standard_b64encode(file_bytes).decode('utf-8')
+            pdf_data = base64.standard_b64encode(file_bytes).decode("utf-8")
             messages = [{"role": "user", "content": [
                 {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": pdf_data}},
-                {"type": "text", "text": caption or t(lang, 'doc_pdf_prompt')}]}]
-        elif doc.mime_type in ('image/gif', 'video/mp4') or (doc.file_name and doc.file_name.endswith('.gif')):
-            if user_id in ADMIN_IDS:
-                await update.message.reply_text(f"file_id: {doc.file_id}")
-            else:
-                await update.message.reply_text("GIF!")
-            return
-        elif doc.mime_type and doc.mime_type.startswith('image/'):
-            await update.message.reply_text(t(lang, 'doc_img_received'))
+                {"type": "text", "text": caption or "Проанализируй документ."}
+            ]}]
+        elif doc.mime_type and doc.mime_type.startswith("image/"):
+            await update.message.reply_text("🔍 Анализирую изображение...")
             file = await context.bot.get_file(doc.file_id)
             file_bytes = await file.download_as_bytearray()
-            image_data = base64.standard_b64encode(file_bytes).decode('utf-8')
-            messages = get_history(user_id) + [{"role": "user", "content": [
+            image_data = base64.standard_b64encode(file_bytes).decode("utf-8")
+            history = get_history(user_id, topic)
+            messages = history + [{"role": "user", "content": [
                 {"type": "image", "source": {"type": "base64", "media_type": doc.mime_type, "data": image_data}},
-                {"type": "text", "text": caption or t(lang, 'doc_img_question')}]}]
+                {"type": "text", "text": caption or "Что на этом изображении?"}
+            ]}]
         else:
-            await update.message.reply_text(t(lang, 'doc_unsupported'))
+            await update.message.reply_text("Умею читать PDF и изображения.")
             return
-        response = client.messages.create(model="claude-sonnet-4-6", max_tokens=1500,
-                                          system=get_system(user_id), messages=messages)
-        reply = response.content[0].text
-        save_message(user_id, "user", f"[file] {caption}")
-        save_message(user_id, "assistant", reply)
+        resp = ai.messages.create(model="claude-sonnet-4-6", max_tokens=1200,
+                                   stop_sequences=["user:", "\nuser:", "\nUser:"],
+                                   system=get_system(user_id, topic), messages=messages)
+        reply = resp.content[0].text.strip()
+        save_message(user_id, "user", f"пользователь прислал файл: {caption}", topic)
+        save_message(user_id, "assistant", reply, topic)
         await update.message.reply_text(reply)
     except Exception as e:
-        logger.error(f"Document error: {e}")
-        await update.message.reply_text(t(lang, 'doc_error'))
+        logger.error(f"Document: {e}")
+        await update.message.reply_text("⚠️ Ошибка с файлом.")
 
-async def handle_animation(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    anim = update.message.animation
-    if anim and user_id in ADMIN_IDS:
-        await update.message.reply_text(f"file_id: {anim.file_id}")
+async def check_reminders(context):
+    for rid, user_id, title in get_due_reminders():
+        try:
+            await context.bot.send_message(chat_id=user_id, text=f"⏰ Напоминание: {title}")
+            mark_reminder_fired(rid)
+        except Exception as e:
+            logger.error(f"Reminder: {e}")
 
-async def cmd_getid(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id not in ADMIN_IDS:
-        return
-    msg = update.message.reply_to_message
-    if not msg:
-        await update.message.reply_text("Reply to a media message with /getid")
-        return
-    for field in ['animation', 'video', 'document', 'photo', 'voice']:
-        obj = getattr(msg, field, None)
-        if obj:
-            fid = obj[-1].file_id if field == 'photo' else obj.file_id
-            await update.message.reply_text(f"{field}_file_id:\n`{fid}`", parse_mode='Markdown')
-            return
-    await update.message.reply_text("No media found")
-
+# ══════════════════════════════════════════════════════════════════════════════
+# BOOT
+# ══════════════════════════════════════════════════════════════════════════════
+init_db()
 app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+app.job_queue.run_repeating(check_reminders, interval=60, first=10)
 
-img_conv = ConversationHandler(
-    entry_points=[CommandHandler("image", cmd_image)],
-    states={
-        IMG_PHOTO: [
-            MessageHandler(filters.PHOTO, img_receive_photo),
-            CallbackQueryHandler(img_skip_photo_callback, pattern="^img_skip_photo$"),
-        ],
-        IMG_PROMPT: [MessageHandler(filters.TEXT & ~filters.COMMAND, img_receive_prompt)],
-        IMG_SETTINGS: [CallbackQueryHandler(img_settings_callback, pattern="^ratio_")],
-    },
-    fallbacks=[CommandHandler("cancel", cmd_cancel)],
-    per_user=True, per_chat=True,
-)
-vid_conv = ConversationHandler(
-    entry_points=[CommandHandler("video", cmd_video_gen)],
-    states={
-        VID_PHOTO: [MessageHandler(filters.PHOTO, vid_receive_photo)],
-        VID_PROMPT: [MessageHandler(filters.TEXT & ~filters.COMMAND, vid_receive_prompt)],
-        VID_SETTINGS: [CallbackQueryHandler(vid_settings_callback, pattern="^vd_")],
-    },
-    fallbacks=[CommandHandler("cancel", cmd_cancel)],
-    per_user=True, per_chat=True,
-)
-app.add_handler(onb_conv)
-app.add_handler(img_conv)
-app.add_handler(vid_conv)
-
-app.add_handler(CallbackQueryHandler(onb_callback, pattern='^onb_'))
+app.add_handler(CommandHandler("start",  cmd_start))
+app.add_handler(CommandHandler("reset",  cmd_reset))
+app.add_handler(CommandHandler("image",  cmd_image))
+app.add_handler(CommandHandler("video",  cmd_video))
+app.add_handler(CommandHandler("status", cmd_status))
+app.add_handler(CommandHandler("admin",  cmd_admin))
 app.add_handler(CommandHandler("topics", cmd_topics))
-app.add_handler(CallbackQueryHandler(topics_callback, pattern="^topic_"))
-app.add_handler(CallbackQueryHandler(lang_callback, pattern="^setlang_"))
-app.add_handler(CommandHandler("start", cmd_start))
-app.add_handler(CommandHandler("language", cmd_language))
-app.add_handler(CommandHandler("subscribe", cmd_subscribe))
-app.add_handler(CommandHandler("getid", cmd_getid))
-app.add_handler(CommandHandler("reset", cmd_reset))
-app.add_handler(CommandHandler("memory", cmd_memory))
-app.add_handler(CommandHandler("admin", cmd_admin))
-app.add_handler(CommandHandler("activate", cmd_activate))
-app.add_handler(CommandHandler("block", cmd_block))
-app.add_handler(PreCheckoutQueryHandler(pre_checkout))
-app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment))
+app.add_handler(CallbackQueryHandler(topics_callback, pattern="^topic:"))
+app.add_handler(CallbackQueryHandler(media_callback,  pattern="^media:"))
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 app.add_handler(MessageHandler(filters.VOICE, handle_voice))
-app.add_handler(MessageHandler(filters.ANIMATION, handle_animation))
-app.add_handler(MessageHandler((filters.VIDEO & ~filters.ANIMATION) | filters.VIDEO_NOTE, handle_media_video))
-app.add_handler(MessageHandler(filters.PHOTO, handle_smart_photo))
+app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
 app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
-print("Bot started v13 — rate limiting")
-import datetime as dt
-app.job_queue.run_repeating(check_reminders, interval=60, first=10)
-app.job_queue.run_daily(
-    check_expiring_subscriptions,
-    time=dt.time(hour=10, minute=0, tzinfo=timezone.utc)
-)
+
+print("BX Bot v8 — clean rewrite")
 app.run_polling()
