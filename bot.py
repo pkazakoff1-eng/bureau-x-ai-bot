@@ -1,4 +1,5 @@
 import anthropic
+import asyncio
 import requests
 import time
 import sqlite3
@@ -67,6 +68,9 @@ REMINDER_SOFT = ["напомни", "напоминание", "не забыть"
 ai     = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
 tavily = TavilyClient(api_key=TAVILY_KEY)
 whisper = WhisperModel("tiny", device="cpu", compute_type="int8")
+
+async def ai_create(**kw):
+    return await asyncio.to_thread(lambda: ai.messages.create(**kw))
 
 # ══════════════════════════════════════════════════════════════════════════════
 # DATABASE
@@ -155,6 +159,8 @@ def get_history(user_id, topic=None, limit=20):
             caption = content[6:].strip()
             content = f"пользователь прислал фото{': ' + caption if caption else ''}"
         messages.append({"role": role, "content": content})
+    while messages and messages[0]["role"] != "user":
+        messages.pop(0)
     return messages
 
 def save_message(user_id, role, content, topic="общее"):
@@ -362,7 +368,7 @@ async def maybe_update_notes(user_id, topic, history):
         old_notes = get_topic_notes(user_id, topic)
         dialogue = "\n".join([f"{m['role']}: {m['content'][:200]}" for m in history[-10:]])
         try:
-            resp = ai.messages.create(
+            resp = await ai_create(
                 model="claude-haiku-4-5-20251001", max_tokens=300,
                 messages=[{"role": "user", "content": (
                     f"Обнови заметки по теме '{topic}'.\nСтарые: {old_notes}\n\n"
@@ -492,7 +498,7 @@ def needs_search(text):
 
 def web_search(query):
     try:
-        result = tavily.search(query=query, max_results=3)
+        result = tavily.search(query=query[:400], max_results=3)
         return "\n\n".join([r["content"] for r in result["results"][:3]])
     except Exception as e:
         logger.error(f"Search: {e}")
@@ -533,7 +539,7 @@ async def update_summary(user_id):
         history = get_history(user_id)
         old = get_summary(user_id)
         try:
-            resp = ai.messages.create(
+            resp = await ai_create(
                 model="claude-haiku-4-5-20251001", max_tokens=300,
                 messages=[{"role": "user", "content": (
                     f"Сделай краткое резюме диалога (3-5 предложений).\nПредыдущее: {old}\n\n"
@@ -906,7 +912,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 context.user_data.pop("waiting_img_edit_photo_first", None)
                 await update.message.reply_text("❌ Не удалось загрузить фото. Пришли снова.")
                 return
-            url = generate_image_edit_ws(direct_url, prompt)
+            url = await asyncio.to_thread(generate_image_edit_ws, direct_url, prompt)
             if url:
                 context.user_data.pop("waiting_img_edit_photo_first", None)
                 inc_usage(user_id, "images")
@@ -930,7 +936,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 context.user_data.pop("waiting_video_photo_first", None)
                 await update.message.reply_text("❌ Не удалось загрузить фото. Пришли снова.")
                 return
-            url = generate_video_ws(direct_url, prompt)
+            url = await asyncio.to_thread(generate_video_ws, direct_url, prompt)
             if url:
                 context.user_data.pop("waiting_video_photo_first", None)
                 inc_usage(user_id, "videos")
@@ -952,7 +958,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text("⚠️ Лимит фото исчерпан.")
                 return
             await update.message.reply_text("🎨 Генерирую...")
-            url = generate_image_ws(user_text)
+            url = await asyncio.to_thread(generate_image_ws, user_text)
             if url:
                 context.user_data.pop("media_mode", None)
                 inc_usage(user_id, "images")
@@ -976,7 +982,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text("⚠️ Лимит видео исчерпан.")
                 return
             await update.message.reply_text("🎬 Генерирую видео (30-60 сек)...")
-            url = generate_video_from_text_ws(user_text)
+            url = await asyncio.to_thread(generate_video_from_text_ws, user_text)
             if url:
                 context.user_data.pop("media_mode", None)
                 inc_usage(user_id, "videos")
@@ -1016,8 +1022,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         # Напоминания
-        if detect_reminder(user_text):
-            dt, title = parse_reminder(user_text)
+        if await asyncio.to_thread(detect_reminder, user_text):
+            dt, title = await asyncio.to_thread(parse_reminder, user_text)
             if dt and title:
                 await send_reminder_ics(update, context, title, dt, user_id)
             else:
@@ -1034,13 +1040,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # Тема
         pinned = get_user_topic(user_id)
-        topic = pinned if pinned else detect_topic(user_text, user_id)
+        topic = pinned if pinned else await asyncio.to_thread(detect_topic, user_text, user_id)
 
         # Поиск
         search_ctx = ""
-        if needs_search(user_text):
+        if await asyncio.to_thread(needs_search, user_text):
             await update.message.reply_text("🔍 Ищу...")
-            search_ctx = web_search(user_text)
+            search_ctx = await asyncio.to_thread(web_search, user_text)
 
         save_message(user_id, "user", user_text, topic)
         await update_summary(user_id)
@@ -1048,7 +1054,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if search_ctx:
             history[-1]["content"] += f"\n\n[Поиск]:\n{search_ctx}"
 
-        resp = ai.messages.create(
+        resp = await ai_create(
             model="claude-sonnet-4-6", max_tokens=1200,
             stop_sequences=["user:", "\nuser:", "\nUser:"],
             system=get_system(user_id, topic), messages=history
@@ -1074,7 +1080,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file = await context.bot.get_file(voice.file_id)
         path = f"/tmp/voice_{user_id}.ogg"
         await file.download_to_drive(path)
-        segments, _ = whisper.transcribe(path, language="ru")
+        segments, _ = await asyncio.to_thread(whisper.transcribe, path, language="ru")
         text = " ".join([s.text for s in segments]).strip()
         os.remove(path)
         if not text:
@@ -1082,17 +1088,17 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         await update.message.reply_text(f"📝 Распознал: {text}")
 
-        if detect_reminder(text):
-            dt, title = parse_reminder(text)
+        if await asyncio.to_thread(detect_reminder, text):
+            dt, title = await asyncio.to_thread(parse_reminder, text)
             if dt and title:
                 await send_reminder_ics(update, context, title, dt, user_id)
             return
 
         pinned = get_user_topic(user_id)
-        topic = pinned if pinned else detect_topic(text, user_id)
+        topic = pinned if pinned else await asyncio.to_thread(detect_topic, text, user_id)
         save_message(user_id, "user", text, topic)
         history = get_history(user_id, topic)
-        resp = ai.messages.create(
+        resp = await ai_create(
             model="claude-sonnet-4-6", max_tokens=1200,
             system=get_system(user_id, topic), messages=history
         )
@@ -1120,7 +1126,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not direct_url:
                 await update.message.reply_text("❌ Не удалось загрузить фото. Пришли снова.")
                 return
-            url = generate_image_edit_ws(direct_url, prompt)
+            url = await asyncio.to_thread(generate_image_edit_ws, direct_url, prompt)
             if url:
                 context.user_data.pop("waiting_img_edit", None)
                 context.user_data.pop("img_edit_prompt", None)
@@ -1145,7 +1151,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not direct_url:
                 await update.message.reply_text("❌ Не удалось загрузить фото. Пришли снова.")
                 return
-            url = generate_video_ws(direct_url, prompt)
+            url = await asyncio.to_thread(generate_video_ws, direct_url, prompt)
             if url:
                 context.user_data.pop("waiting_video", None)
                 context.user_data.pop("video_prompt", None)
@@ -1172,7 +1178,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if not direct_url:
                     await update.message.reply_text("❌ Не удалось загрузить фото.")
                     return
-                url = generate_image_edit_ws(direct_url, caption_prompt)
+                url = await asyncio.to_thread(generate_image_edit_ws, direct_url, caption_prompt)
                 if url:
                     inc_usage(user_id, "images")
                     await context.bot.send_photo(chat_id=update.effective_chat.id, photo=url,
@@ -1209,7 +1215,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if not direct_url:
                     await update.message.reply_text("❌ Не удалось загрузить фото.")
                     return
-                url = generate_image_edit_ws(direct_url, photo_caption)
+                url = await asyncio.to_thread(generate_image_edit_ws, direct_url, photo_caption)
                 if url:
                     inc_usage(user_id, "images")
                     await context.bot.send_photo(chat_id=update.effective_chat.id, photo=url,
@@ -1229,13 +1235,13 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         image_data = base64.standard_b64encode(file_bytes).decode("utf-8")
         caption = update.message.caption or "Что на этом фото?"
         pinned = get_user_topic(user_id)
-        topic = pinned if pinned else detect_topic(caption, user_id)
+        topic = pinned if pinned else await asyncio.to_thread(detect_topic, caption, user_id)
         history = get_history(user_id, topic)
         messages = history + [{"role": "user", "content": [
             {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": image_data}},
             {"type": "text", "text": caption}
         ]}]
-        resp = ai.messages.create(model="claude-sonnet-4-6", max_tokens=1200,
+        resp = await ai_create(model="claude-sonnet-4-6", max_tokens=1200,
                                    stop_sequences=["user:", "\nuser:", "\nUser:"],
                                    system=get_system(user_id, topic), messages=messages)
         reply = resp.content[0].text.strip()
@@ -1278,7 +1284,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await update.message.reply_text("Умею читать PDF и изображения.")
             return
-        resp = ai.messages.create(model="claude-sonnet-4-6", max_tokens=1200,
+        resp = await ai_create(model="claude-sonnet-4-6", max_tokens=1200,
                                    stop_sequences=["user:", "\nuser:", "\nUser:"],
                                    system=get_system(user_id, topic), messages=messages)
         reply = resp.content[0].text.strip()
@@ -1303,6 +1309,11 @@ async def check_reminders(context):
 init_db()
 app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 app.job_queue.run_repeating(check_reminders, interval=60, first=10)
+
+async def on_error(update, context):
+    logger.error("Unhandled error", exc_info=context.error)
+
+app.add_error_handler(on_error)
 
 app.add_handler(CommandHandler("start",  cmd_start))
 app.add_handler(CommandHandler("reset",  cmd_reset))
