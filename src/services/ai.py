@@ -35,7 +35,7 @@ def get_system(user_id, topic=None):
     today = date.today().strftime("%d %B %Y")
     prefs = db.get_prefs(user_id)
     summary = db.get_summary(user_id)
-    notes = db.get_topic_notes(user_id, topic) if topic and topic != "общее" else ""
+    all_notes = db.get_all_notes(user_id)
 
     sys = (
         f"Ты личный ассистент. Сегодня: {today}.\n"
@@ -50,8 +50,12 @@ def get_system(user_id, topic=None):
     )
     if topic and topic != "общее":
         sys += f"\n\nТекущая тема: [{topic.upper()}]. История ведётся отдельно по этой теме."
-    if notes:
-        sys += f"\n\nЗаметки по теме:\n{notes}"
+    if all_notes:
+        sys += ("\n\nЧТО ТЫ УЖЕ ЗНАЕШЬ О ПОЛЬЗОВАТЕЛЕ (заметки по темам). "
+                "НЕ переспрашивай эти факты — используй их:")
+        for t, n in all_notes:
+            limit = 1200 if t == topic else 500
+            sys += f"\n[{t}]: {n[:limit]}"
     if summary:
         sys += f"\n\nКраткое резюме прошлых разговоров:\n{summary}"
     if prefs:

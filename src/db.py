@@ -119,7 +119,7 @@ def init_db():
 # ══════════════════════════════════════════════════════════════════════════════
 # MESSAGES
 # ══════════════════════════════════════════════════════════════════════════════
-def get_history(user_id, topic=None, limit=20):
+def get_history(user_id, topic=None, limit=30):
     conn = _conn()
     c = conn.cursor()
     if topic and topic != "общее":
@@ -376,6 +376,16 @@ def add_user_topic(user_id, name, description=""):
                  (user_id, name.lower(), description))
     conn.commit()
     conn.close()
+
+
+def get_all_notes(user_id):
+    """Заметки по всем темам пользователя — для сквозной памяти."""
+    conn = _conn()
+    rows = conn.execute(
+        "SELECT topic, notes FROM topic_notes WHERE user_id=? AND notes != ''",
+        (user_id,)).fetchall()
+    conn.close()
+    return rows
 
 
 def get_topic_notes(user_id, topic):
