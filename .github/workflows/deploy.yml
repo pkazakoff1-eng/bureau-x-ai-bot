@@ -7,7 +7,21 @@ on:
       - dev
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Syntax and unit tests
+        run: |
+          python -m compileall -q bot.py src tests
+          python -m unittest discover -s tests -v
+
   deploy:
+    needs: test
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - name: Deploy to server
@@ -19,7 +33,8 @@ jobs:
           script: |
             cd /root/tg_bot
             git fetch origin
-            git checkout ${{ github.ref_name }}
-            git pull origin ${{ github.ref_name }}
+            git checkout main
+            git pull --ff-only origin main
             systemctl restart tgbot.service
-            echo "Deployed ${{ github.ref_name }} at $(date)"
+            systemctl is-active --quiet tgbot.service
+            echo "Deployed main at $(date)"
