@@ -27,15 +27,14 @@ OLD_BTN_MAP = {
 async def _chat_reply(update, user_id, topic, text, search_ctx=""):
     db.save_message(user_id, "user", text, topic)
     await ai.update_summary(user_id)
-    history = db.get_history(user_id, topic)
+    history = db.get_history(user_id)
     if search_ctx and history:
         history[-1]["content"] += f"\n\n[Поиск]:\n{search_ctx}"
     reply = await ai.chat(user_id, topic, history)
     db.save_message(user_id, "assistant", reply, topic)
     spend(user_id, "messages")
-    await ai.maybe_update_notes(user_id, topic, history)
-    label = f"[{topic.upper()}] " if topic and topic != "общее" else ""
-    await update.message.reply_text(f"{label}{reply}")
+    await ai.maybe_update_notes(user_id, topic)
+    await update.message.reply_text(reply)
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -136,7 +135,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         caption = update.message.caption or "Что на этом фото?"
         pinned = db.get_user_topic(user_id)
         topic = pinned if pinned else await ai.resolve_topic(caption, user_id)
-        history = db.get_history(user_id, topic)
+        history = db.get_history(user_id)
         messages = history + [{"role": "user", "content": [
             {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": image_data}},
             {"type": "text", "text": caption}
@@ -165,7 +164,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             file = await context.bot.get_file(doc.file_id)
             file_bytes = await file.download_as_bytearray()
             pdf_data = base64.standard_b64encode(file_bytes).decode("utf-8")
-            messages = [{"role": "user", "content": [
+            messages = db.get_history(user_id) + [{"role": "user", "content": [
                 {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": pdf_data}},
                 {"type": "text", "text": caption or "Проанализируй документ."}
             ]}]
@@ -174,7 +173,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             file = await context.bot.get_file(doc.file_id)
             file_bytes = await file.download_as_bytearray()
             image_data = base64.standard_b64encode(file_bytes).decode("utf-8")
-            history = db.get_history(user_id, topic)
+            history = db.get_history(user_id)
             messages = history + [{"role": "user", "content": [
                 {"type": "image", "source": {"type": "base64", "media_type": doc.mime_type, "data": image_data}},
                 {"type": "text", "text": caption or "Что на этом изображении?"}

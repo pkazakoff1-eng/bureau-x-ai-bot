@@ -74,9 +74,9 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🤖 BX Assistant — команды:\n\n"
         "/image — генерация и редактирование фото\n"
         "/video — генерация видео\n"
-        "/topics — темы (отдельная память по каждой)\n"
+        "/topics — тематические заметки при общей истории диалога\n"
         "/status — тариф и лимиты на сегодня\n"
-        "/reset — очистить историю текущей темы\n\n"
+        "/reset — очистить общую историю диалога\n\n"
         "Просто пиши текстом или голосом — отвечу.\n"
         "Пришли фото или PDF — проанализирую.\n"
         "Скажи «напомни …» — создам событие для календаря.\n\n"
@@ -85,14 +85,9 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    topic = db.get_user_topic(user_id)
     context.user_data.clear()
-    if topic:
-        db.clear_history(user_id, topic)
-        await update.message.reply_text(f"🗑 История темы [{topic.upper()}] очищена. Начнём заново!")
-    else:
-        db.clear_history(user_id)
-        await update.message.reply_text("🗑 История очищена. Начнём заново!")
+    db.clear_history(user_id)
+    await update.message.reply_text("🗑 Общая история диалога очищена. Начнём заново!")
 
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):

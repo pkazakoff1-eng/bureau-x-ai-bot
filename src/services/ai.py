@@ -1,9 +1,7 @@
 """BX Assistant — Claude AI: чат, классификация, заметки, резюме."""
 import asyncio
 import logging
-from datetime import date, datetime
-
-STICKY_TOPIC_SECONDS = 900  # 15 минут: продолжение разговора не меняет тему
+from datetime import date
 
 import anthropic
 
@@ -38,8 +36,9 @@ def get_system(user_id, topic=None):
     all_notes = db.get_all_notes(user_id)
 
     sys = (
-        f"Ты личный ассистент. Сегодня: {today}.\n"
-        f"Отвечай на ЛЮБОЙ вопрос пользователя — нет запрещённых тем.\n"
+        f"Ты личный рабочий ассистент пользователя. Сегодня: {today}.\n"
+        f"Помогай доводить запрос до конкретного результата в пределах доступных функций.\n"
+        f"Не утверждай, что выполнил внешнее действие, если фактически его не выполнял.\n"
         f"Ты можешь: анализировать фото/PDF когда они приложены, создавать напоминания (.ics).\n"
         f"Команды бота: /image (генерация фото), /video (генерация видео), /topics (темы), /reset (очистить историю).\n"
         f"Если просят сгенерировать фото или видео — направляй на /image или /video.\n"
@@ -49,7 +48,8 @@ def get_system(user_id, topic=None):
         f"Отвечай кратко и по делу."
     )
     if topic and topic != "общее":
-        sys += f"\n\nТекущая тема: [{topic.upper()}]. История ведётся отдельно по этой теме."
+        sys += (f"\n\nТема текущего сообщения: [{topic.upper()}]. "
+                "Она используется только для организации заметок; история разговора единая.")
     if all_notes:
         sys += ("\n\nЧТО ТЫ УЖЕ ЗНАЕШЬ О ПОЛЬЗОВАТЕЛЕ (заметки по темам). "
                 "НЕ переспрашивай эти факты — используй их:")
@@ -74,17 +74,7 @@ async def chat(user_id, topic, messages):
 
 # ── Классификация ─────────────────────────────────────────────────────────────
 async def resolve_topic(text, user_id):
-    """Липкая тема: если разговор продолжается (<15 мин с последнего сообщения),
-    остаёмся в текущей теме — не рвём один диалог на части."""
-    row = db.last_topic_info(user_id)
-    if row:
-        try:
-            last_ts = datetime.fromisoformat(str(row[1]).split(".")[0])
-            age = (datetime.utcnow() - last_ts).total_seconds()
-            if 0 <= age < STICKY_TOPIC_SECONDS:
-                return row[0]
-        except (ValueError, TypeError):
-            pass
+    """Classify only for notes; classification never changes chat history."""
     return await detect_topic(text, user_id)
 
 
@@ -120,11 +110,14 @@ async def needs_search(text, keyword_hit):
 
 
 # ── Фоновая память ────────────────────────────────────────────────────────────
-async def maybe_update_notes(user_id, topic, history):
+async def maybe_update_notes(user_id, topic):
     cnt = db.topic_message_count(user_id, topic)
     if cnt > 0 and cnt % 10 == 0:
         old_notes = db.get_topic_notes(user_id, topic)
-        dialogue = "\n".join([f"{m['role']}: {str(m['content'])[:200]}" for m in history[-10:]])
+        topic_history = db.get_topic_history(user_id, topic, limit=10)
+        dialogue = "\n".join(
+            [f"{m['role']}: {str(m['content'])[:200]}" for m in topic_history]
+        )
         try:
             text = await util(
                 f"Ты — модуль памяти бота, НЕ собеседник. Обнови заметки по теме '{topic}'.\n"

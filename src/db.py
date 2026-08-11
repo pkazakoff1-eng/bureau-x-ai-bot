@@ -120,16 +120,16 @@ def init_db():
 # MESSAGES
 # ══════════════════════════════════════════════════════════════════════════════
 def get_history(user_id, topic=None, limit=30):
+    """Return one global conversation history for the user.
+
+    ``topic`` remains in the signature for backward compatibility, but topics
+    only organise notes. They must not split conversational context.
+    """
     conn = _conn()
-    c = conn.cursor()
-    if topic and topic != "общее":
-        c.execute("""SELECT role, content FROM messages
-                     WHERE user_id=? AND topic=? ORDER BY id DESC LIMIT ?""",
-                  (user_id, topic, limit))
-    else:
-        c.execute("""SELECT role, content FROM messages
-                     WHERE user_id=? ORDER BY id DESC LIMIT ?""", (user_id, limit))
-    rows = c.fetchall()
+    rows = conn.execute(
+        "SELECT role, content FROM messages WHERE user_id=? ORDER BY id DESC LIMIT ?",
+        (user_id, limit),
+    ).fetchall()
     conn.close()
     messages = []
     for role, content in reversed(rows):
@@ -141,6 +141,21 @@ def get_history(user_id, topic=None, limit=30):
     while messages and messages[0]["role"] != "user":
         messages.pop(0)
     return messages
+
+
+def get_topic_history(user_id, topic, limit=10):
+    """Return topic-specific messages only for maintaining topic notes."""
+    conn = _conn()
+    rows = conn.execute(
+        "SELECT role, content FROM messages "
+        "WHERE user_id=? AND topic=? ORDER BY id DESC LIMIT ?",
+        (user_id, topic, limit),
+    ).fetchall()
+    conn.close()
+    return [
+        {"role": role, "content": content}
+        for role, content in reversed(rows)
+    ]
 
 
 def save_message(user_id, role, content, topic="общее"):

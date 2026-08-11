@@ -37,7 +37,7 @@ async def topics_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         notes = db.get_topic_notes(user_id, topic)
         notes_text = f"\n\n📝 Заметки:\n{notes}" if notes else ""
         await query.edit_message_text(
-            f"✅ Тема: *{topic.upper()}*{notes_text}\n\nИстория этой темы загружена.",
+            f"✅ Тема заметок: *{topic.upper()}*{notes_text}\n\nИстория диалога остаётся общей.",
             parse_mode="Markdown")
 
 
